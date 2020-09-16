@@ -1,7 +1,7 @@
 #pragma once
 #include <linux/bpf.h>
-#include <linux/types.h>
 #include <stddef.h>
+#include <types.h>
 
 #include "common.h"
 #include "ewma.h"

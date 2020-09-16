@@ -1,9 +1,7 @@
 #pragma once
-
-#include <linux/types.h>
-
 #include "common.h"
 #include "fixed-point.h"
+#include <types.h>
 
 #define WINDOW 1000000000ull
 
