@@ -18,6 +18,15 @@ struct iphdr {
 	__u32 daddr;
 };
 
+// from musl: include/netinet/in6.h
+struct in6_addr {
+	union {
+		__u8  __s6_addr[16];
+		__u16 __s6_addr16[8];
+		__u32 __s6_addr32[4];
+	} __in6_union;
+};
+
 // from musl: include/netinet/ip6.h
 struct ip6_hdr {
 	union {
@@ -31,13 +40,4 @@ struct ip6_hdr {
 	} ip6_ctlun;
 	struct in6_addr ip6_src;
 	struct in6_addr ip6_dst;
-};
-
-// from musl: include/netinet/in6.h
-struct in6_addr {
-	union {
-		__u8  __s6_addr[16];
-		__u16 __s6_addr16[8];
-		__u32 __s6_addr32[4];
-	} __in6_union;
 };
