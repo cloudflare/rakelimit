@@ -6,7 +6,7 @@ import (
 	"syscall"
 )
 
-//go:generate bpf2go -cc clang-9 rake ./src/rakelimit.c -- -I./src -I./include -I./include/bpf -I./include/linux -nostdinc -O3 -Wno-address-of-packed-member
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang-9 rake ./src/rakelimit.c -- -I./include -nostdinc -O3 -Wno-address-of-packed-member
 
 // Rakelimit holds an instance of a ratelimiter that can be applied on a socket
 type Rakelimit struct {
@@ -42,9 +42,6 @@ func NewRakelimit(ppsLimit float64) (*Rakelimit, error) {
 const SoAttachBPF = 50
 
 // Attach enables the rate limiter on a socket, which it expects as a File pointer
-// TODO: his should be Attach(syscall.Conn) and then use syscall.RawConn.Control
-// to get the file descriptor. The way it's done here is racy and can still move
-// the socket into blocking mode.
 func (rl *Rakelimit) Attach(f *os.File) error {
 	fd := int(f.Fd())
 	syscall.SetNonblock(fd, true)

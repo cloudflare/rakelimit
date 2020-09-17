@@ -17,3 +17,5 @@
 
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
+
+unsigned long long load_byte(void *skb, unsigned long long off) asm("llvm.bpf.load.byte");

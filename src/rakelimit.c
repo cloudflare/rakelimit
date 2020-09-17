@@ -1,9 +1,9 @@
 #include <linux/bpf.h>
-#include <ip.h>
+#include <linux/ip.h>
 #include <stddef.h>
+#include <bpf/bpf_endian.h>
+#include <bpf/bpf_helpers.h>
 
-#include "bpf_endian.h"
-#include "bpf_helpers.h"
 #include "common.h"
 #include "countmin.h"
 #include "fasthash.h"
