@@ -445,5 +445,5 @@ func runScenario(t *testing.T, filename string, traffic []packet, start time.Tim
 	if err != nil {
 		t.Fatal("Can't marshal record:", err)
 	}
-	ioutil.WriteFile(filename, bytes, 600)
+	ioutil.WriteFile(filename, bytes, 0666)
 }
