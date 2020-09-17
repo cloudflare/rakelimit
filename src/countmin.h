@@ -40,10 +40,10 @@ static __u64 FORCE_INLINE add_to_cm(struct countmin *cm, __u64 ts, struct packet
 		__u32 target_idx       = fasthash64(element, sizeof(struct packet_element), i) & (COLUMNS - 1);
 		struct cm_value *value = &cm->values[i][target_idx];
 		value->value           = estimate_avg_rate(value->value, ts - value->ts);
-		value->ts = ts;
+		value->ts              = ts;
 		if (value->value < min) {
 			min = value->value;
 		}
 	}
 	return min;
-} 
+}

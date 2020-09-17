@@ -1,6 +1,8 @@
+#include <ip.h>
 #include <linux/bpf.h>
-#include <linux/ip.h>
+#include <linux/types.h>
 #include <stddef.h>
+
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 
@@ -35,7 +37,6 @@ struct bpf_map_def SEC("maps") stats = {
 	.max_entries = 5, // 5 levels
 };
 
-
 struct bpf_map_def SEC("maps") countmin = {
 	.type        = BPF_MAP_TYPE_ARRAY,
 	.key_size    = sizeof(__u32),
@@ -54,7 +55,6 @@ static fpoint FORCE_INLINE add_to_node(__u64 ts, int node_idx, struct packet_ele
 	return add_to_cm(node, ts, element);
 }
 
-
 static FORCE_INLINE void log_level_drop(__u32 level)
 {
 	__u64 *count = bpf_map_lookup_elem(&stats, &level);
@@ -70,7 +70,7 @@ static FORCE_INLINE void fill_ip(__u8 ip[16], struct __sk_buff *skb, enum addres
 {
 	__u64 off = 0;
 	int len   = 0;
-	//TODO: fix for IPv6
+	// TODO: fix for IPv6
 	if (spec == SOURCE) {
 		off = offsetof(struct iphdr, saddr);
 	} else {
@@ -163,7 +163,7 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts)
 	fpoint max_rate               = 0;
 
 	// get rate limit
-	__u32 i             = 0;
+	__u32 i = 0;
 	if (limit == 0) {
 		return SKB_PASS;
 	}
@@ -186,7 +186,7 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts)
 	generalise(&element, skb, ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD);
 	max_rate = estimate_max_rate(max_rate, ts, 3, &element);
 
-	if (max_rate > limit) {	
+	if (max_rate > limit) {
 		return drop_or_accept(1, limit, max_rate);
 	}
 
