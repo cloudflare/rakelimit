@@ -1,5 +1,5 @@
 #include <linux/bpf.h>
-#include <linux/ip.h>
+#include <ip.h>
 #include <stddef.h>
 
 #include "bpf_endian.h"
