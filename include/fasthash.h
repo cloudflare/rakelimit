@@ -25,7 +25,7 @@
 
 #pragma once
 
-#include "types.h"
+#include <linux/types.h>
 #include <stddef.h>
 
 // Compression function for Merkle-Damgard construction.

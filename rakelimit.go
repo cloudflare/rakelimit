@@ -6,7 +6,7 @@ import (
 	"syscall"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang-9 rake ./src/rakelimit.c -- -I./src -I./include -I./include/bpf -I./include/linux -nostdinc -O3 -Wno-address-of-packed-member
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang-9 rake ./src/rakelimit.c -- -I./include -nostdinc -O3 -Wno-address-of-packed-member
 
 // Rakelimit holds an instance of a ratelimiter that can be applied on a socket
 type Rakelimit struct {

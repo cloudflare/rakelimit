@@ -1,9 +1,10 @@
 #pragma once
 
-#include "bpf_helpers.h"
-#include "common.h"
 #include <linux/bpf.h>
-#include <types.h>
+#include <linux/types.h>
+#include <bpf/bpf_helpers.h>
+
+#include "common.h"
 
 #define FRACTION_BITS 32
 
