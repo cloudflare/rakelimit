@@ -1,7 +1,9 @@
 #pragma once
+
+#include <linux/types.h>
+
 #include "common.h"
 #include "fixed-point.h"
-#include <types.h>
 
 // 100ms
 #define WINDOW_NS 100000000ull
