@@ -1,8 +1,13 @@
 package rakelimit
 
 import (
+	"math"
+	"net"
 	"testing"
 	"time"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 )
 
 func TestLoadBPF(t *testing.T) {
@@ -107,4 +112,53 @@ func TestBPFFEwma(t *testing.T) {
 	if err := sr.Lookup(uint32(0), &result); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func BenchmarkRakelimit(b *testing.B) {
+	limit, err := NewRakelimit(math.MaxUint32)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer limit.Close()
+
+	b.Run("IPv4", func(b *testing.B) {
+		packet := mustSerializeLayers(b,
+			&layers.Ethernet{
+				SrcMAC:       []byte{1, 2, 3, 4, 5, 6},
+				DstMAC:       []byte{6, 5, 4, 3, 2, 1},
+				EthernetType: layers.EthernetTypeIPv4,
+			},
+			&layers.IPv4{
+				SrcIP:    net.IPv4(192, 0, 2, 0),
+				DstIP:    net.IPv4(192, 0, 2, 123),
+				Protocol: layers.IPProtocolUDP,
+			},
+			&layers.UDP{
+				SrcPort: layers.UDPPort(12345),
+				DstPort: layers.UDPPort(443),
+			},
+			gopacket.Payload([]byte{1, 2, 3, 4}),
+		)
+		b.ResetTimer()
+
+		_, duration, err := limit.bpfObjects.ProgramProdAnchor.Benchmark(packet, b.N, b.ResetTimer)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		b.ReportMetric(float64(duration/time.Nanosecond), "ns/op")
+	})
+}
+
+func mustSerializeLayers(tb testing.TB, layers ...gopacket.SerializableLayer) []byte {
+	tb.Helper()
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{}
+	err := gopacket.SerializeLayers(buf, opts, layers...)
+	if err != nil {
+		tb.Fatal("Can't serialize layers:", err)
+	}
+
+	return buf.Bytes()
 }
