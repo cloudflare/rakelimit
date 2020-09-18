@@ -25,11 +25,11 @@ _Static_assert((COLUMNS & (COLUMNS - 1)) == 0, "COLUMNS must be a power of two")
 struct cm_value {
 	fpoint value;
 	__u64 ts;
-} __attribute__((packed));
+};
 
 struct countmin {
 	struct cm_value values[HASHFN_N][COLUMNS];
-} __attribute__((packed));
+};
 
 // add element and determine count
 static __u64 FORCE_INLINE add_to_cm(struct countmin *cm, __u64 ts, struct packet_element *element)
