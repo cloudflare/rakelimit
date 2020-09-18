@@ -10,24 +10,8 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-func TestLoadBPF(t *testing.T) {
-	rakeLimitSpec, err := newRakeSpecs()
-	if err != nil {
-		t.Fatal("Can't get elf spec", err)
-	}
-
-	programSpecs, err := rakeLimitSpec.Load(nil)
-	if err != nil {
-		t.Fatal("Can't load program", err)
-	}
-	defer programSpecs.Close()
-
-	prog := programSpecs.ProgramProdAnchor
-	payload := make([]byte, 14)
-	_, _, err = prog.Test(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestNew(t *testing.T) {
+	mustNew(t, 1000)
 }
 
 const floatBits = 32
@@ -55,7 +39,7 @@ func TestBPFFloatToFixedPoint(t *testing.T) {
 	lookupTable := programSpecs.MapTestSingleResult
 	payload := make([]byte, 14)
 
-	// check 20
+	// check 27
 	if err := lookupTable.Put(uint32(0), floatToFixed(27.0)); err != nil {
 		t.Fatal(err)
 	}
@@ -115,11 +99,7 @@ func TestBPFFEwma(t *testing.T) {
 }
 
 func BenchmarkRakelimit(b *testing.B) {
-	limit, err := NewRakelimit(math.MaxUint32)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer limit.Close()
+	limit, _ := mustNew(b, math.MaxUint32)
 
 	b.Run("IPv4", func(b *testing.B) {
 		packet := mustSerializeLayers(b,
@@ -161,4 +141,23 @@ func mustSerializeLayers(tb testing.TB, layers ...gopacket.SerializableLayer) []
 	}
 
 	return buf.Bytes()
+}
+
+func mustNew(tb testing.TB, limit uint32) (*Rakelimit, *net.UDPConn) {
+	tb.Helper()
+
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		tb.Fatal("Can't listen:", err)
+	}
+	tb.Cleanup(func() { conn.Close() })
+
+	udp := conn.(*net.UDPConn)
+	rake, err := New(udp, limit)
+	if err != nil {
+		tb.Fatal("Can't create limiter:", err)
+	}
+	tb.Cleanup(func() { rake.Close() })
+
+	return rake, udp
 }
