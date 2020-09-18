@@ -2,8 +2,9 @@ package rakelimit
 
 import (
 	"fmt"
-	"os"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang-9 rake ./src/rakelimit.c -- -I./include -nostdinc -O3 -Wno-address-of-packed-member
@@ -13,9 +14,8 @@ type Rakelimit struct {
 	bpfObjects *rakeObjects
 }
 
-// NewRakelimit creates a new Rakelimit instance based on the specified ppsLimit
-func NewRakelimit(ppsLimit float64) (*Rakelimit, error) {
-	var rakelimit Rakelimit
+// New creates a new Rakelimit instance based on the specified ppsLimit
+func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 	rakelimitSpec, err := newRakeSpecs()
 	if err != nil {
 		return nil, fmt.Errorf("Can't get elf spec: %v", err)
@@ -24,7 +24,7 @@ func NewRakelimit(ppsLimit float64) (*Rakelimit, error) {
 	// set ratelimit
 	collectionSpec := rakelimitSpec.CollectionSpec()
 	if err := collectionSpec.RewriteConstants(map[string]interface{}{
-		"limit": floatToFixed(ppsLimit),
+		"limit": floatToFixed(float64(ppsLimit)),
 	}); err != nil {
 		return nil, fmt.Errorf("Can't rewrite limit: %v", err)
 	}
@@ -34,27 +34,35 @@ func NewRakelimit(ppsLimit float64) (*Rakelimit, error) {
 		return nil, fmt.Errorf("Can't load BPF program: %v", err)
 	}
 
-	rakelimit.bpfObjects = programSpecs
-	return &rakelimit, nil
-}
-
-// SoAttachBPF defines the parameter for setsockopt to attach a bpf program
-const SoAttachBPF = 50
-
-// Attach enables the rate limiter on a socket, which it expects as a File pointer
-func (rl *Rakelimit) Attach(f *os.File) error {
-	fd := int(f.Fd())
-	syscall.SetNonblock(fd, true)
-	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, SoAttachBPF, rl.bpfObjects.ProgramProdAnchor.FD()); err != nil {
-		return fmt.Errorf("Can't attach bpf program to socket: %v", err)
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return nil, fmt.Errorf("raw conn: %s", err)
 	}
-	return nil
-}
 
-// GetDropStatsPerLevel gets the amount of packet drops
-// that occured on the given level, identified by the index in the result
-func (rl *Rakelimit) GetDropStatsPerLevel() ([]int64, error) {
-	return nil, nil
+	var opErr error
+	if err := raw.Control(func(s uintptr) {
+		var domain int
+		domain, opErr = unix.GetsockoptInt(int(s), unix.SOL_SOCKET, unix.SO_DOMAIN)
+		if opErr != nil {
+			opErr = fmt.Errorf("can't retrieve domain: %s", opErr)
+			return
+		}
+		if domain != unix.AF_INET {
+			opErr = fmt.Errorf("only IPv4 is supported")
+			return
+		}
+		opErr = unix.SetsockoptInt(int(s), unix.SOL_SOCKET, unix.SO_ATTACH_BPF, programSpecs.ProgramProdAnchor.FD())
+		if opErr != nil {
+			opErr = fmt.Errorf("can't attach BPF to socket: %s", opErr)
+		}
+	}); err != nil {
+		return nil, fmt.Errorf("can't access fd: %s", err)
+	}
+	if opErr != nil {
+		return nil, opErr
+	}
+
+	return &Rakelimit{bpfObjects: programSpecs}, nil
 }
 
 // Close cleans up resources occupied and should be called when finished using the structure
