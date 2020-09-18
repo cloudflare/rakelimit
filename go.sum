@@ -1,5 +1,5 @@
-github.com/cilium/ebpf v0.0.0-20200825101210-df046db7294d h1:rQpy5uOtss+pe+Zw+zd9GCWU1ggiriWhQSoPje9OlQE=
-github.com/cilium/ebpf v0.0.0-20200825101210-df046db7294d/go.mod h1:7cR51M8ViRLIdUjrmSXlK9pkrsDlLHbO8jiB8X8JnOc=
+github.com/cilium/ebpf v0.0.0-20200917151652-9b4cff7de01e h1:dTpKcp8fLDxBQAyXaSrAedlwhXwc5mqLDwr0HR6VjlY=
+github.com/cilium/ebpf v0.0.0-20200917151652-9b4cff7de01e/go.mod h1:44MooKJJW1eGX0M0Ne/tB1uxHmzizXDaLREv3WIHrJ0=
 github.com/google/gopacket v1.1.18 h1:lum7VRA9kdlvBi7/v2p7/zcbkduHaCH/SVVyurs7OpY=
 github.com/google/gopacket v1.1.18/go.mod h1:UdDNZ1OO62aGYVnPhxT1U6aI7ukYtA/kB8vaU0diBUM=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
