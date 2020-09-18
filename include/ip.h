@@ -22,10 +22,10 @@ struct iphdr {
 // from musl: include/netinet/in6.h
 struct in6_addr {
 	union {
-		__u8 __s6_addr[16];
-		__u16 __s6_addr16[8];
-		__u32 __s6_addr32[4];
-	} __in6_union;
+		__u8 s6_addr[16];
+		__u16 s6_addr16[8];
+		__u32 s6_addr32[4];
+	};
 };
 
 // from musl: include/netinet/ip6.h
