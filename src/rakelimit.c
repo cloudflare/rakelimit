@@ -66,10 +66,26 @@ static FORCE_INLINE void log_level_drop(__u32 level)
 
 static volatile const fpoint limit = 0;
 
-static FORCE_INLINE void fill_ip(__u8 ip[16], struct __sk_buff *skb, enum address_cidr type, enum address_specifier spec)
+static FORCE_INLINE __u16 skb_proto(const struct __sk_buff *skb)
+{
+	__u32 proto;
+	/* This horrible contraption prevents the compiler from trying to load
+	 * skb->protocol via a modified pointer with a zero offset, which is
+	 * rejected by the verifier:
+	 *     r1 = *(u32 *)(r7 +0)
+	 *     dereference of modified ctx ptr R7 off=16 disallowed
+	 * Use inline asm to emit
+	 *     r1 = *(u32 *)(r7 +16)
+	 * instead. Note that we have to use a 32bit load since the field in
+	 * __sk_buff is defined as such.
+	 */
+	asm("%[proto] = *(u32 *)(%[skb] +16)" : [proto] "+r"(proto) : [skb] "r"(skb));
+	return proto;
+}
+
+static FORCE_INLINE void fill_ip(struct in6_addr *ip, struct __sk_buff *skb, enum address_cidr type, enum address_specifier spec)
 {
 	__u64 off = 0;
-	int len   = 0;
 	// TODO: fix for IPv6
 	if (spec == SOURCE) {
 		off = offsetof(struct iphdr, saddr);
@@ -77,65 +93,65 @@ static FORCE_INLINE void fill_ip(__u8 ip[16], struct __sk_buff *skb, enum addres
 		off = offsetof(struct iphdr, daddr);
 	}
 
-#pragma clang loop unroll(full)
-	for (int i = 0; i < 16; i++) {
-		ip[i] = 0; // reset everything
-	}
+	__u16 proto = skb_proto(skb);
+	if (proto == bpf_htons(ETH_P_IP)) {
+		ip->s6_addr32[0] = 0;
+		ip->s6_addr32[1] = 0;
+		ip->s6_addr32[2] = bpf_htonl(0xffff);
+		ip->s6_addr32[3] = load_word(skb, BPF_NET_OFF + off);
 
-	if (skb->protocol == bpf_htons(ETH_P_IP)) {
-		if (type == ADDRESS_NET || type == ADDRESS_IP) {
-			ip[12] = load_byte(skb, BPF_NET_OFF + off);
-			ip[13] = load_byte(skb, BPF_NET_OFF + off + 1);
-			ip[14] = load_byte(skb, BPF_NET_OFF + off + 2);
+		switch (type) {
+		case ADDRESS_NET:
+			ip->s6_addr32[3] &= bpf_htonl(0x000000ff);
+			break;
+
+		case ADDRESS_WILDCARD:
+			ip->s6_addr32[3] = 0;
+			break;
+
+		default:
+			break;
 		}
-		if (type == ADDRESS_IP) {
-			ip[15] = load_byte(skb, BPF_NET_OFF + off + 3);
-		}
-		ip[10] = 0xff;
-		ip[11] = 0xff;
 	}
 
 	// ipv6
-	else if (skb->protocol == bpf_htons(ETH_P_IPV6)) {
-		if (type == ADDRESS_NET) {
-			len = 6; // 48
-		} else if (type == ADDRESS_IP) {
-			if (spec == SOURCE) {
-				len = 8; // 64
-			} else if (spec == DEST) {
-				len = 16; // 128
-			}
-		}
+	else if (proto == bpf_htons(ETH_P_IPV6)) {
+		bpf_skb_load_bytes(skb, off, ip, sizeof(*ip));
 
-#pragma clang loop unroll(full)
-		for (int i = 0; i < len; i++) {
-			ip[i] = load_byte(skb, BPF_NET_OFF + off + i);
+		// 16: 0    1    2    3    4    5    6    7
+		// 32: 0         1         2         3
+		// /48 ffff ffff ffff 0000 0000 0000 0000 0000
+		// /64 ffff ffff ffff ffff 0000 0000 0000 0000
+		if (type == ADDRESS_NET) {
+			ip->s6_addr16[3] = 0;
+			ip->s6_addr32[2] = 0;
+			ip->s6_addr32[3] = 0;
+		} else if (type == ADDRESS_IP && spec == SOURCE) {
+			ip->s6_addr32[2] = 0;
+			ip->s6_addr32[3] = 0;
 		}
 	}
-	return;
 }
 
-static FORCE_INLINE void fill_port(__u16 *port, struct __sk_buff *skb, enum address_specifier addr, enum port_cidr type)
+static FORCE_INLINE __u16 fill_port(struct __sk_buff *skb, enum address_specifier addr, enum port_cidr type)
 {
 	if (type == PORT_WILDCARD) {
-		*port = 0;
-		return;
+		return 0;
 	}
 	if (addr == DEST) {
 		// assuming TCP or UDP, offsets 2-3 of L4 are dport
-		*port = (load_byte(skb, 2) << 8) | load_byte(skb, 3);
-	} else if (addr == SOURCE) {
-		*port = (load_byte(skb, 0) << 8) | load_byte(skb, 1);
+		return load_half(skb, 2);
 	}
-	return;
+
+	return load_half(skb, 0);
 }
 
 static FORCE_INLINE void generalise(struct packet_element *element, struct __sk_buff *skb, enum address_cidr sourceAddressPrefix, enum port_cidr generaliseSourcePort, enum address_cidr destinationAddressPrefix, enum port_cidr generaliseDestinationPort)
 {
-	fill_ip(element->source_address, skb, sourceAddressPrefix, SOURCE);
-	fill_ip(element->destination_address, skb, destinationAddressPrefix, DEST);
-	fill_port(&element->source_port, skb, SOURCE, generaliseSourcePort);
-	fill_port(&element->destination_port, skb, DEST, generaliseDestinationPort);
+	fill_ip(&element->source_address, skb, sourceAddressPrefix, SOURCE);
+	fill_ip(&element->destination_address, skb, destinationAddressPrefix, DEST);
+	element->source_port      = fill_port(skb, SOURCE, generaliseSourcePort);
+	element->destination_port = fill_port(skb, DEST, generaliseDestinationPort);
 }
 
 static FORCE_INLINE int drop_or_accept(__u32 level, fpoint limit, fpoint max_rate)
