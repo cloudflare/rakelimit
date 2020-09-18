@@ -17,20 +17,17 @@ service in question won't be able to handle anymore:
 
 ```go
 
-address, err := net.ResolveUDPAddr("udp4", ":9876")
+conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
 if err != nil {
-    log.Fatal("b", err)
+    tb.Fatal("Can't listen:", err)
 }
+udpConn := conn.(*net.UDPConn)
 
-connection, err := net.ListenUDP("udp4", address)
-if err != nil {
-	log.Fatal("a", err)
-}
-
-// our service can handle 128 packets per second
+// We don't want to allow anyone to use more than 128 packets per second
 ppsPerSecond := 128
-rake, err := New(connection, ppsPerSecond)
+rake, err := New(udpConn, ppsPerSecond)
 defer rake.Close()
+// rate limiter stays active even after closing
 ```
 
 That's all! The library now enforces rate limits on incoming packets, and it happens within the kernel.
@@ -38,4 +35,4 @@ That's all! The library now enforces rate limits on incoming packets, and it hap
 ## Limitations
 - no IPv6 (we're working on adding it)
 - requires tweaking of optmem
-- not production ready
+- not tested in production
