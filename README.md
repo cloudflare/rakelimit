@@ -32,6 +32,12 @@ defer rake.Close()
 
 That's all! The library now enforces rate limits on incoming packets, and it happens within the kernel.
 
+## Requirements
+
+The library should be go-gettable, and has been tested on Linux 5.4.
+
+You will need a `clang-9` binary if you want to recompile the filter. Simply run `go generate` in the root of the project.
+
 ## Limitations
 - no IPv6 (we're working on adding it)
 - requires tweaking of optmem
