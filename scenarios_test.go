@@ -180,6 +180,44 @@ func randomIP(rng *rand.Rand, prevIP net.IP, template net.IP) net.IP {
 	return ip
 }
 
+func TestRate(t *testing.T) {
+	const (
+		duration = 10 * time.Second
+		limit    = 100
+	)
+
+	rake := mustNew(t, limit)
+
+	packets := generatePackets(duration, packetSpec{
+		rate: 2 * limit,
+		element: element{
+			SourceAddress:      []byte{7, 6, 5, 4},
+			DestinationAddress: []byte{1, 2, 3, 4},
+			SourcePort:         53,
+			DestinationPort:    443,
+		},
+	})
+
+	var accepted int
+	for _, packet := range packets {
+		rake.updateTime(t, packet.received)
+
+		verdict, _, err := rake.program.Test(packet.element)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if verdict > 0 {
+			accepted++
+		}
+	}
+
+	acceptedRate := float64(accepted) / duration.Seconds()
+	if acceptedRate < limit*0.95 || acceptedRate > limit*1.05 {
+		t.Errorf("Didn't match desired rate of %d: %.2f pps accepted", limit, acceptedRate)
+	}
+}
+
 func TestFullySpecifiedAttacker(t *testing.T) {
 	traffic := generatePackets(time.Minute,
 		packetSpec{
