@@ -46,7 +46,7 @@ struct bpf_map_def SEC("maps") countmin = {
 	.max_entries = NODES,
 };
 
-static fpoint FORCE_INLINE add_to_node(__u64 ts, int node_idx, struct packet_element *element)
+static fpoint FORCE_INLINE add_to_node(__u64 ts, int node_idx, void *element, __u64 len)
 {
 	fpoint min = -1;
 	__u32 target_idx;
@@ -54,7 +54,7 @@ static fpoint FORCE_INLINE add_to_node(__u64 ts, int node_idx, struct packet_ele
 	if (node == NULL) {
 		return -1;
 	}
-	return add_to_cm(node, ts, element);
+	return add_to_cm(node, ts, element, len);
 }
 
 static FORCE_INLINE void log_level_drop(__u32 level)
@@ -163,9 +163,9 @@ static FORCE_INLINE int drop_or_accept(__u32 level, fpoint limit, __u32 max_rate
 	return SKB_PASS;
 }
 
-static FORCE_INLINE fpoint estimate_max_rate(fpoint max_rate, __u64 ts, __u32 node_index, struct packet_element *element)
+static FORCE_INLINE fpoint estimate_max_rate(fpoint max_rate, __u64 ts, __u32 node_index, void *element, __u64 len)
 {
-	fpoint rate = add_to_node(ts, node_index, element);
+	fpoint rate = add_to_node(ts, node_index, element, len);
 	if (rate > max_rate) {
 		return rate;
 	}
@@ -186,7 +186,7 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts, __u32 ra
 
 	/*level 0*/
 	generalise(&element, skb, ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 0, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 0, &element, sizeof(element));
 
 	if (max_rate > limit) {
 		return drop_or_accept(0, limit, to_int(max_rate), rand);
@@ -194,13 +194,13 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts, __u32 ra
 
 	/* level 1 */
 	generalise(&element, skb, ADDRESS_NET, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 1, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 1, &element, sizeof(element));
 
 	generalise(&element, skb, ADDRESS_IP, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 2, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 2, &element, sizeof(element));
 
 	generalise(&element, skb, ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 3, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 3, &element, sizeof(element));
 
 	if (max_rate > limit) {
 		return drop_or_accept(1, limit, to_int(max_rate), rand);
@@ -209,19 +209,19 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts, __u32 ra
 	/* level 2 */
 	/* *.*.*.*:i --> w.x.y.z:j */
 	generalise(&element, skb, ADDRESS_WILDCARD, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 4, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 4, &element, sizeof(element));
 
 	/* a.b.c.*:* --> w.x.y.z:j */
 	generalise(&element, skb, ADDRESS_NET, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 5, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 5, &element, sizeof(element));
 
 	/* a.b.c.*:i --> w.x.y.z:* */
 	generalise(&element, skb, ADDRESS_NET, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 6, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 6, &element, sizeof(element));
 
 	/* a.b.c.d:* --> w.x.y.z:* */
 	generalise(&element, skb, ADDRESS_IP, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 7, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 7, &element, sizeof(element));
 
 	if (max_rate > limit) {
 		return drop_or_accept(2, limit, to_int(max_rate), rand);
@@ -230,15 +230,15 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts, __u32 ra
 	/* level 3 */
 	/* *.*.*.*:* --> w.x.y.z:j */
 	generalise(&element, skb, ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 8, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 8, &element, sizeof(element));
 
 	/* *.*.*.*:i --> w.x.y.z:* */
 	generalise(&element, skb, ADDRESS_WILDCARD, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 9, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 9, &element, sizeof(element));
 
 	/* A.B.C.*:* --> w.x.y.z:* */
 	generalise(&element, skb, ADDRESS_NET, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 10, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 10, &element, sizeof(element));
 
 	if (max_rate > limit) {
 		return drop_or_accept(3, limit, to_int(max_rate), rand);
@@ -246,7 +246,7 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts, __u32 ra
 
 	/* level 4 */
 	generalise(&element, skb, ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 11, &element);
+	max_rate = estimate_max_rate(max_rate, ts, 11, &element, sizeof(element));
 	if (max_rate > limit) {
 		return drop_or_accept(4, limit, to_int(max_rate), rand);
 	}

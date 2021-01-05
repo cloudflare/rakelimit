@@ -32,12 +32,12 @@ struct countmin {
 };
 
 // add element and determine count
-static __u64 FORCE_INLINE add_to_cm(struct countmin *cm, __u64 now, struct packet_element *element)
+static __u64 FORCE_INLINE add_to_cm(struct countmin *cm, __u64 now, void *element, __u64 len)
 {
 	fpoint min = -1;
 #pragma clang loop unroll(full)
 	for (int i = 0; i < HASHFN_N; i++) {
-		__u32 target_idx       = fasthash64(element, sizeof(struct packet_element), i) & (COLUMNS - 1);
+		__u32 target_idx       = fasthash64(element, len, i) & (COLUMNS - 1);
 		struct cm_value *value = &cm->values[i][target_idx];
 		value->value           = estimate_avg_rate(value->value, value->ts, now);
 		value->ts              = now;
