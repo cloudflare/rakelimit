@@ -293,10 +293,14 @@ func TestGeneralisations(t *testing.T) {
 	}
 }
 
-func TestFullySpecifiedAttacker(t *testing.T) {
-	traffic := generatePackets(time.Minute,
+func TestAttackPropagation(t *testing.T) {
+	const limit = 2645
+
+	packets := generatePackets(10*time.Second,
 		packetSpec{
-			"attacker", 100, element{
+			key:  "attack",
+			rate: 3 * limit,
+			element: element{
 				SourceAddress:      []byte{7, 6, 5, 4},
 				DestinationAddress: []byte{1, 2, 3, 4},
 				SourcePort:         53,
@@ -304,7 +308,49 @@ func TestFullySpecifiedAttacker(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"insideHH", 5, element{
+			key:  "legit",
+			rate: limit / 2,
+			element: element{
+				SourceAddress:      []byte{7, 6, 5, 4},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         -1,
+				DestinationPort:    443,
+			},
+		},
+	)
+
+	rake := mustNew(t, limit)
+	rake.updateRand(t, math.MaxUint32)
+	for i, packet := range packets {
+		rake.updateTime(t, packet.received)
+
+		verdict, _, err := rake.program.Test(packet.element)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if packet.key == "legit" && verdict == 0 {
+			t.Errorf("Dropped legitimate packet #%d: %v", i, rake.mustMetrics(t).DroppedPacketsPerLevel)
+		}
+	}
+}
+
+func TestFullySpecifiedAttacker(t *testing.T) {
+	traffic := generatePackets(time.Minute,
+		packetSpec{
+			key:  "attacker",
+			rate: 100,
+			element: element{
+				SourceAddress:      []byte{7, 6, 5, 4},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         53,
+				DestinationPort:    443,
+			},
+		},
+		packetSpec{
+			key:  "insideHH",
+			rate: 5,
+			element: element{
 				SourceAddress:      []byte{7, 6, 5, 1},
 				DestinationAddress: []byte{1, 2, 3, 4},
 				SourcePort:         53,
@@ -312,7 +358,9 @@ func TestFullySpecifiedAttacker(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"outsideHH", 5, element{
+			key:  "outsideHH",
+			rate: 5,
+			element: element{
 				SourceAddress:      []byte{1, 1, 1, 1},
 				DestinationAddress: []byte{6, 7, 8, 9},
 				SourcePort:         10,
@@ -320,7 +368,9 @@ func TestFullySpecifiedAttacker(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"noise", 100, element{
+			key:  "noise",
+			rate: 100,
+			element: element{
 				SourceAddress:      []byte{8, 7},
 				DestinationAddress: []byte{6, 7},
 				SourcePort:         -1,
@@ -335,7 +385,9 @@ func TestFullySpecifiedAttacker(t *testing.T) {
 func TestAttackerSubnet(t *testing.T) {
 	traffic := generatePackets(time.Minute,
 		packetSpec{
-			"attacker", 100, element{
+			key:  "attacker",
+			rate: 100,
+			element: element{
 				SourceAddress:      []byte{7, 6, 5},
 				DestinationAddress: []byte{1, 2, 3, 4},
 				SourcePort:         53,
@@ -343,7 +395,9 @@ func TestAttackerSubnet(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"insideHH", 5, element{
+			key:  "insideHH",
+			rate: 5,
+			element: element{
 				SourceAddress:      []byte{7, 6, 5, 1},
 				DestinationAddress: []byte{1, 2, 3, 4},
 				SourcePort:         53,
@@ -351,7 +405,9 @@ func TestAttackerSubnet(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"outsideHH", 5, element{
+			key:  "outsideHH",
+			rate: 5,
+			element: element{
 				SourceAddress:      []byte{1, 1, 1, 1},
 				DestinationAddress: []byte{6, 7, 8, 9},
 				SourcePort:         10,
@@ -359,7 +415,9 @@ func TestAttackerSubnet(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"noise", 100, element{
+			key:  "noise",
+			rate: 100,
+			element: element{
 				SourceAddress:      []byte{8, 9},
 				DestinationAddress: []byte{},
 				SourcePort:         -1,
@@ -374,7 +432,9 @@ func TestAttackerSubnet(t *testing.T) {
 func TestAttackerSubnetRandomPort(t *testing.T) {
 	traffic := generatePackets(time.Minute,
 		packetSpec{
-			"attacker", 100, element{
+			key:  "attacker",
+			rate: 100,
+			element: element{
 				SourceAddress:      []byte{7, 6, 5},
 				DestinationAddress: []byte{1, 2, 3, 4},
 				SourcePort:         -1,
@@ -382,7 +442,9 @@ func TestAttackerSubnetRandomPort(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"insideHH", 5, element{
+			key:  "insideHH",
+			rate: 5,
+			element: element{
 				SourceAddress:      []byte{7, 6, 5, 1},
 				DestinationAddress: []byte{1, 2, 3, 4},
 				SourcePort:         53,
@@ -390,7 +452,9 @@ func TestAttackerSubnetRandomPort(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"outsideHH", 5, element{
+			key:  "outsideHH",
+			rate: 5,
+			element: element{
 				SourceAddress:      []byte{1, 1, 1, 1},
 				DestinationAddress: []byte{6, 7, 8, 9},
 				SourcePort:         10,
@@ -398,7 +462,9 @@ func TestAttackerSubnetRandomPort(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"noise", 100, element{
+			key:  "noise",
+			rate: 100,
+			element: element{
 				SourceAddress:      []byte{7, 6},
 				DestinationAddress: []byte{},
 				SourcePort:         -1,
@@ -413,7 +479,9 @@ func TestAttackerSubnetRandomPort(t *testing.T) {
 func TestReflectionAttack(t *testing.T) {
 	traffic := generatePackets(time.Minute,
 		packetSpec{
-			"attacker", 100, element{
+			key:  "attacker",
+			rate: 100,
+			element: element{
 				SourceAddress:      []byte{},
 				DestinationAddress: []byte{1, 2, 3, 4},
 				SourcePort:         53,
@@ -421,7 +489,9 @@ func TestReflectionAttack(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"insideHH", 5, element{
+			key:  "insideHH",
+			rate: 5,
+			element: element{
 				SourceAddress:      []byte{7, 6, 5, 1},
 				DestinationAddress: []byte{1, 2, 3, 4},
 				SourcePort:         53,
@@ -429,7 +499,9 @@ func TestReflectionAttack(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"outsideHH", 5, element{
+			key:  "outsideHH",
+			rate: 5,
+			element: element{
 				SourceAddress:      []byte{1, 1, 1, 1},
 				DestinationAddress: []byte{6, 7, 8, 9},
 				SourcePort:         10,
@@ -437,7 +509,9 @@ func TestReflectionAttack(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"noise", 100, element{
+			key:  "noise",
+			rate: 100,
+			element: element{
 				SourceAddress:      []byte{},
 				DestinationAddress: []byte{6, 8},
 				SourcePort:         -1,
@@ -452,7 +526,9 @@ func TestReflectionAttack(t *testing.T) {
 func TestDestinationOverload(t *testing.T) {
 	traffic := generatePackets(time.Minute,
 		packetSpec{
-			"attacker", 100, element{
+			key:  "attacker",
+			rate: 100,
+			element: element{
 				SourceAddress:      []byte{},
 				DestinationAddress: []byte{1, 2, 3, 4},
 				SourcePort:         -1,
@@ -460,7 +536,9 @@ func TestDestinationOverload(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"insideHH", 5, element{
+			key:  "insideHH",
+			rate: 5,
+			element: element{
 				SourceAddress:      []byte{7, 6, 5, 1},
 				DestinationAddress: []byte{1, 2, 3, 4},
 				SourcePort:         53,
@@ -468,7 +546,9 @@ func TestDestinationOverload(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"outsideHH", 5, element{
+			key:  "outsideHH",
+			rate: 5,
+			element: element{
 				SourceAddress:      []byte{1, 1, 1, 1},
 				DestinationAddress: []byte{6, 7, 8, 9},
 				SourcePort:         10,
@@ -476,7 +556,9 @@ func TestDestinationOverload(t *testing.T) {
 			},
 		},
 		packetSpec{
-			"noise", 100, element{
+			key:  "noise",
+			rate: 100,
+			element: element{
 				SourceAddress:      []byte{7, 6},
 				DestinationAddress: []byte{},
 				SourcePort:         -1,
