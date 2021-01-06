@@ -1,6 +1,7 @@
 #include <ip.h>
 #include <linux/bpf.h>
 #include <linux/types.h>
+#include <stdbool.h>
 #include <stddef.h>
 
 #include <bpf/bpf_endian.h>
@@ -11,11 +12,9 @@
 #include "fasthash.h"
 #include "packet_element.h"
 
-#define NODES 12
-
 static volatile const __u32 LIMIT;
 
-enum address_cidr {
+enum address_gen {
 	ADDRESS_IP       = 0, // /32 or /64
 	ADDRESS_NET      = 1, // /24 or /48
 	ADDRESS_WILDCARD = 2, // /0
@@ -26,9 +25,48 @@ enum address_specifier {
 	DEST,
 };
 
-enum port_cidr {
+enum port_gen {
 	PORT_SPECIFIED = 0,
 	PORT_WILDCARD  = 1,
+};
+
+struct gen {
+	enum address_gen source;
+	enum port_gen source_port;
+	enum address_gen dest;
+	enum port_gen dest_port;
+	bool evaluate;
+};
+
+static const struct gen generalisations[] = {
+	/*level 0*/
+	{ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED, true},
+
+	/* level 1 */
+	{ADDRESS_NET, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED, false},
+	{ADDRESS_IP, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED, false},
+	{ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD, true},
+
+	/* level 2 */
+	/* *.*.*.*:i --> w.x.y.z:j */
+	{ADDRESS_WILDCARD, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED, false},
+	/* a.b.c.*:* --> w.x.y.z:j */
+	{ADDRESS_NET, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED, false},
+	/* a.b.c.*:i --> w.x.y.z:* */
+	{ADDRESS_NET, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD, false},
+	/* a.b.c.d:* --> w.x.y.z:* */
+	{ADDRESS_IP, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD, true},
+
+	/* level 3 */
+	/* *.*.*.*:* --> w.x.y.z:j */
+	{ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED, false},
+	/* *.*.*.*:i --> w.x.y.z:* */
+	{ADDRESS_WILDCARD, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD, false},
+	/* A.B.C.*:* --> w.x.y.z:* */
+	{ADDRESS_NET, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD, true},
+
+	/* level 4 */
+	{ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD, true},
 };
 
 // collect number of packet drops per level
@@ -43,8 +81,14 @@ struct bpf_map_def SEC("maps") countmin = {
 	.type        = BPF_MAP_TYPE_ARRAY,
 	.key_size    = sizeof(__u32),
 	.value_size  = sizeof(struct countmin),
-	.max_entries = NODES,
+	.max_entries = ARRAY_SIZE(generalisations),
 };
+
+static int FORCE_INLINE gen_level(const struct gen *gen)
+{
+	// The enum values are chosen so that they add up to the correct level.
+	return gen->source + gen->source_port + gen->dest + gen->dest_port;
+}
 
 static fpoint FORCE_INLINE add_to_node(__u64 ts, int node_idx, void *element, __u64 len)
 {
@@ -66,7 +110,7 @@ static FORCE_INLINE void log_level_drop(__u32 level)
 	(*count)++;
 }
 
-static FORCE_INLINE __u16 skb_proto(const struct __sk_buff *skb)
+static FORCE_INLINE __u16 skb_proto(struct __sk_buff *skb)
 {
 	__u32 proto;
 	/* This horrible contraption prevents the compiler from trying to load
@@ -83,7 +127,7 @@ static FORCE_INLINE __u16 skb_proto(const struct __sk_buff *skb)
 	return proto;
 }
 
-static FORCE_INLINE void fill_ip(struct in6_addr *ip, struct __sk_buff *skb, enum address_cidr type, enum address_specifier spec)
+static FORCE_INLINE void fill_ip(struct in6_addr *ip, struct __sk_buff *skb, enum address_gen type, enum address_specifier spec)
 {
 	__u64 off = 0;
 	// TODO: fix for IPv6
@@ -133,7 +177,7 @@ static FORCE_INLINE void fill_ip(struct in6_addr *ip, struct __sk_buff *skb, enu
 	}
 }
 
-static FORCE_INLINE __u16 fill_port(struct __sk_buff *skb, enum address_specifier addr, enum port_cidr type)
+static FORCE_INLINE __u16 fill_port(struct __sk_buff *skb, enum address_specifier addr, enum port_gen type)
 {
 	if (type == PORT_WILDCARD) {
 		return 0;
@@ -146,12 +190,12 @@ static FORCE_INLINE __u16 fill_port(struct __sk_buff *skb, enum address_specifie
 	return load_half(skb, BPF_NET_OFF + sizeof(struct iphdr));
 }
 
-static FORCE_INLINE void generalise(struct packet_element *element, struct __sk_buff *skb, enum address_cidr sourceAddressPrefix, enum port_cidr generaliseSourcePort, enum address_cidr destinationAddressPrefix, enum port_cidr generaliseDestinationPort)
+static FORCE_INLINE void generalise(struct __sk_buff *skb, const struct gen *gen, struct packet_element *element)
 {
-	fill_ip(&element->source_address, skb, sourceAddressPrefix, SOURCE);
-	fill_ip(&element->destination_address, skb, destinationAddressPrefix, DEST);
-	element->source_port      = fill_port(skb, SOURCE, generaliseSourcePort);
-	element->destination_port = fill_port(skb, DEST, generaliseDestinationPort);
+	fill_ip(&element->source_address, skb, gen->source, SOURCE);
+	fill_ip(&element->destination_address, skb, gen->dest, DEST);
+	element->source_port      = fill_port(skb, SOURCE, gen->source_port);
+	element->destination_port = fill_port(skb, DEST, gen->dest_port);
 }
 
 static FORCE_INLINE int drop_or_accept(__u32 level, fpoint limit, __u32 max_rate, __u32 rand)
@@ -178,78 +222,26 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts, __u32 ra
 	fpoint max_rate               = 0;
 	fpoint limit                  = to_fixed_point(LIMIT, 0);
 
-	// get rate limit
-	__u32 i = 0;
 	if (limit == 0) {
 		return SKB_PASS;
 	}
 
-	/*level 0*/
-	generalise(&element, skb, ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 0, &element, sizeof(element));
+#pragma clang loop unroll(full)
+	for (int i = 0; i < ARRAY_SIZE(generalisations); i++) {
+		const struct gen *gen = &generalisations[i];
 
-	if (max_rate > limit) {
-		return drop_or_accept(0, limit, to_int(max_rate), rand);
+		generalise(skb, gen, &element);
+		max_rate = estimate_max_rate(max_rate, ts, i, &element, sizeof(element));
+
+		if (gen->evaluate) {
+			if (max_rate > limit) {
+				return drop_or_accept(gen_level(gen), limit, to_int(max_rate), rand);
+			}
+
+			max_rate = 0;
+		}
 	}
 
-	/* level 1 */
-	generalise(&element, skb, ADDRESS_NET, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 1, &element, sizeof(element));
-
-	generalise(&element, skb, ADDRESS_IP, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 2, &element, sizeof(element));
-
-	generalise(&element, skb, ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 3, &element, sizeof(element));
-
-	if (max_rate > limit) {
-		return drop_or_accept(1, limit, to_int(max_rate), rand);
-	}
-
-	/* level 2 */
-	/* *.*.*.*:i --> w.x.y.z:j */
-	generalise(&element, skb, ADDRESS_WILDCARD, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 4, &element, sizeof(element));
-
-	/* a.b.c.*:* --> w.x.y.z:j */
-	generalise(&element, skb, ADDRESS_NET, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 5, &element, sizeof(element));
-
-	/* a.b.c.*:i --> w.x.y.z:* */
-	generalise(&element, skb, ADDRESS_NET, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 6, &element, sizeof(element));
-
-	/* a.b.c.d:* --> w.x.y.z:* */
-	generalise(&element, skb, ADDRESS_IP, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 7, &element, sizeof(element));
-
-	if (max_rate > limit) {
-		return drop_or_accept(2, limit, to_int(max_rate), rand);
-	}
-
-	/* level 3 */
-	/* *.*.*.*:* --> w.x.y.z:j */
-	generalise(&element, skb, ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED);
-	max_rate = estimate_max_rate(max_rate, ts, 8, &element, sizeof(element));
-
-	/* *.*.*.*:i --> w.x.y.z:* */
-	generalise(&element, skb, ADDRESS_WILDCARD, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 9, &element, sizeof(element));
-
-	/* A.B.C.*:* --> w.x.y.z:* */
-	generalise(&element, skb, ADDRESS_NET, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 10, &element, sizeof(element));
-
-	if (max_rate > limit) {
-		return drop_or_accept(3, limit, to_int(max_rate), rand);
-	}
-
-	/* level 4 */
-	generalise(&element, skb, ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD);
-	max_rate = estimate_max_rate(max_rate, ts, 11, &element, sizeof(element));
-	if (max_rate > limit) {
-		return drop_or_accept(4, limit, to_int(max_rate), rand);
-	}
 	return SKB_PASS;
 }
 
