@@ -21,3 +21,5 @@
 unsigned long long load_byte(void *skb, unsigned long long off) asm("llvm.bpf.load.byte");
 unsigned long long load_half(void *skb, unsigned long long off) asm("llvm.bpf.load.half");
 unsigned long long load_word(void *skb, unsigned long long off) asm("llvm.bpf.load.word");
+
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof(a[0]))
