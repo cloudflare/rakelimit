@@ -22,7 +22,7 @@
 _Static_assert((COLUMNS & (COLUMNS - 1)) == 0, "COLUMNS must be a power of two");
 
 struct cm_value {
-	fpoint value;
+	__u32 value;
 	__u64 ts;
 };
 
@@ -31,14 +31,14 @@ struct countmin {
 };
 
 // add element and determine count
-static __u64 FORCE_INLINE add_to_cm(struct countmin *cm, __u64 now, void *element, __u64 len)
+static __u32 FORCE_INLINE cm_add_and_query(struct countmin *cm, __u64 now, void *element, __u64 len)
 {
 	fpoint min = -1;
 #pragma clang loop unroll(full)
 	for (int i = 0; i < HASHFN_N; i++) {
 		__u32 target_idx       = fasthash64(element, len, i) & (COLUMNS - 1);
 		struct cm_value *value = &cm->values[i][target_idx];
-		value->value           = estimate_avg_rate(value->value, value->ts, now);
+		value->value           = estimate_rate(value->value, value->ts, now);
 		value->ts              = now;
 		if (value->value < min) {
 			min = value->value;

@@ -107,15 +107,13 @@ static int FORCE_INLINE gen_level(const struct gen *gen)
 	return gen->source + gen->source_port + gen->dest + gen->dest_port;
 }
 
-static fpoint FORCE_INLINE add_to_node(__u64 ts, int node_idx, void *element, __u64 len)
+static __u32 FORCE_INLINE add_to_node(__u32 node_idx, __u64 ts, void *element, __u64 len)
 {
-	fpoint min = -1;
-	__u32 target_idx;
 	struct countmin *node = bpf_map_lookup_elem(&countmin, &node_idx);
 	if (node == NULL) {
 		return -1;
 	}
-	return add_to_cm(node, ts, element, len);
+	return cm_add_and_query(node, ts, element, len);
 }
 
 static FORCE_INLINE void log_level_drop(__u32 level)
@@ -181,29 +179,19 @@ static FORCE_INLINE void fill_ipv6(struct in6_addr *ip, struct __sk_buff *skb, e
 
 static FORCE_INLINE int drop_or_accept(__u32 level, fpoint limit, __u32 max_rate, __u32 rand)
 {
-	if (div_by_int(limit, max_rate) < to_fixed_point(0, rand)) {
+	if (div_by_int(to_fixed_point(limit, 0), max_rate) < to_fixed_point(0, rand)) {
 		log_level_drop(level);
 		return SKB_REJECT;
 	}
 	return SKB_PASS;
 }
 
-static FORCE_INLINE fpoint estimate_max_rate(fpoint max_rate, __u64 ts, __u32 node_index, void *element, __u64 len)
-{
-	fpoint rate = add_to_node(ts, node_index, element, len);
-	if (rate > max_rate) {
-		return rate;
-	}
-	return max_rate;
-}
-
 static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64 ts, __u32 rand)
 {
 	struct packet pkt = {0};
-	fpoint max_rate   = 0;
-	fpoint limit      = to_fixed_point(LIMIT, 0);
+	__u32 max_rate    = 0;
 
-	if (limit == 0) {
+	if (LIMIT == 0) {
 		return SKB_PASS;
 	}
 
@@ -224,6 +212,7 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64
 #pragma clang loop unroll(full)
 	for (int i = 0; i < ARRAY_SIZE(generalisations); i++) {
 		const struct gen *gen = &generalisations[i];
+		__u32 rate;
 
 		pkt.source_port      = (gen->source_port == PORT_WILDCARD) ? 0 : load_half(skb, troff);
 		pkt.destination_port = (gen->dest_port == PORT_WILDCARD) ? 0 : load_half(skb, troff + 2);
@@ -232,19 +221,23 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64
 		case ETH_P_IP:
 			fill_ipv4(&pkt.ipv4.source_address, skb, gen->source, SOURCE);
 			fill_ipv4(&pkt.ipv4.destination_address, skb, gen->dest, DEST);
-			max_rate = estimate_max_rate(max_rate, ts, i, &pkt, offsetofend(struct packet, ipv4));
+			rate = add_to_node(i, ts, &pkt, offsetofend(struct packet, ipv4));
 			break;
 
 		case ETH_P_IPV6:
 			fill_ipv6(&pkt.ipv6.source_address, skb, gen->source, SOURCE);
 			fill_ipv6(&pkt.ipv6.destination_address, skb, gen->dest, DEST);
-			max_rate = estimate_max_rate(max_rate, ts, i, &pkt, offsetofend(struct packet, ipv6));
+			rate = add_to_node(i, ts, &pkt, offsetofend(struct packet, ipv6));
 			break;
 		}
 
+		if (rate > max_rate) {
+			max_rate = rate;
+		}
+
 		if (gen->evaluate) {
-			if (max_rate > limit) {
-				return drop_or_accept(gen_level(gen), limit, to_int(max_rate), rand);
+			if (max_rate > LIMIT) {
+				return drop_or_accept(gen_level(gen), LIMIT, max_rate, rand);
 			}
 
 			max_rate = 0;
@@ -338,7 +331,7 @@ int test_ewma(struct __sk_buff *skb)
 	if (dur == NULL) {
 		return SKB_REJECT;
 	}
-	*value = estimate_avg_rate(*value, 0, *dur);
+	*value = estimate_rate(*value, 0, *dur);
 	return SKB_PASS;
 }
 
