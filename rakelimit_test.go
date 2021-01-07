@@ -122,7 +122,7 @@ func BenchmarkRakelimit(b *testing.B) {
 		)
 		b.ResetTimer()
 
-		_, duration, err := limit.bpfObjects.ProgramProdAnchor.Benchmark(packet, b.N, b.ResetTimer)
+		_, duration, err := limit.bpfObjects.ProgramFilterIpv4.Benchmark(packet, b.N, b.ResetTimer)
 		if err != nil {
 			b.Fatal(err)
 		}

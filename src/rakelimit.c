@@ -1,3 +1,4 @@
+#include <in.h>
 #include <ip.h>
 #include <linux/bpf.h>
 #include <linux/types.h>
@@ -10,7 +11,6 @@
 #include "common.h"
 #include "countmin.h"
 #include "fasthash.h"
-#include "packet_element.h"
 
 static volatile const __u32 LIMIT;
 
@@ -69,6 +69,23 @@ static const struct gen generalisations[] = {
 	{ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD, true},
 };
 
+struct packet {
+	__u16 source_port;
+	__u16 destination_port;
+	union {
+		struct {
+			struct in_addr source_address;
+			struct in_addr destination_address;
+		} ipv4;
+		struct {
+			struct in6_addr source_address;
+			struct in6_addr destination_address;
+		} ipv6;
+	};
+};
+
+_Static_assert(sizeof(struct packet) == sizeof(__u16) * 2 + sizeof(struct in6_addr) * 2, "wrong packet size");
+
 // collect number of packet drops per level
 struct bpf_map_def SEC("maps") stats = {
 	.type        = BPF_MAP_TYPE_ARRAY,
@@ -110,92 +127,56 @@ static FORCE_INLINE void log_level_drop(__u32 level)
 	(*count)++;
 }
 
-static FORCE_INLINE __u16 skb_proto(struct __sk_buff *skb)
+static FORCE_INLINE __u64 transport_offset_ipv4(struct __sk_buff *skb)
 {
-	__u32 proto;
-	/* This horrible contraption prevents the compiler from trying to load
-	 * skb->protocol via a modified pointer with a zero offset, which is
-	 * rejected by the verifier:
-	 *     r1 = *(u32 *)(r7 +0)
-	 *     dereference of modified ctx ptr R7 off=16 disallowed
-	 * Use inline asm to emit
-	 *     r1 = *(u32 *)(r7 +16)
-	 * instead. Note that we have to use a 32bit load since the field in
-	 * __sk_buff is defined as such.
-	 */
-	asm("%[proto] = *(u32 *)(%[skb] +16)" : [ proto ] "+r"(proto) : [ skb ] "r"(skb));
-	return proto;
+	__u8 version_ihl = load_byte(skb, offsetof(struct iphdr, version_ihl));
+	return (version_ihl & 0xf) * sizeof(__u32);
 }
 
-static FORCE_INLINE void fill_ip(struct in6_addr *ip, struct __sk_buff *skb, enum address_gen type, enum address_specifier spec)
+static FORCE_INLINE __u64 transport_offset_ipv6(struct __sk_buff *skb)
 {
-	__u64 off = 0;
-	// TODO: fix for IPv6
-	if (spec == SOURCE) {
-		off = offsetof(struct iphdr, saddr);
-	} else {
-		off = offsetof(struct iphdr, daddr);
-	}
+	// TODO: Check nexthdr to make sure it's UDP.
+	return sizeof(struct ip6_hdr);
+}
 
-	__u16 proto = skb_proto(skb);
-	if (proto == bpf_htons(ETH_P_IP)) {
-		ip->s6_addr32[0] = 0;
-		ip->s6_addr32[1] = 0;
-		ip->s6_addr32[2] = bpf_htonl(0xffff);
-		ip->s6_addr32[3] = load_word(skb, BPF_NET_OFF + off);
+static FORCE_INLINE void fill_ipv4(struct in_addr *ip, struct __sk_buff *skb, enum address_gen type, enum address_specifier spec)
+{
+	__u64 off = spec == SOURCE ? offsetof(struct iphdr, saddr) : offsetof(struct iphdr, daddr);
 
-		switch (type) {
-		case ADDRESS_NET:
-			ip->s6_addr32[3] &= bpf_htonl(0x000000ff);
-			break;
+	ip->s_addr = load_word(skb, BPF_NET_OFF + off);
 
-		case ADDRESS_WILDCARD:
-			ip->s6_addr32[3] = 0;
-			break;
+	switch (type) {
+	case ADDRESS_NET:
+		ip->s_addr &= 0xffffff00;
+		break;
 
-		default:
-			break;
-		}
-	}
+	case ADDRESS_WILDCARD:
+		ip->s_addr = 0;
+		break;
 
-	// ipv6
-	else if (proto == bpf_htons(ETH_P_IPV6)) {
-		bpf_skb_load_bytes(skb, off, ip, sizeof(*ip));
-
-		// 16: 0    1    2    3    4    5    6    7
-		// 32: 0         1         2         3
-		// /48 ffff ffff ffff 0000 0000 0000 0000 0000
-		// /64 ffff ffff ffff ffff 0000 0000 0000 0000
-		if (type == ADDRESS_NET) {
-			ip->s6_addr16[3] = 0;
-			ip->s6_addr32[2] = 0;
-			ip->s6_addr32[3] = 0;
-		} else if (type == ADDRESS_IP && spec == SOURCE) {
-			ip->s6_addr32[2] = 0;
-			ip->s6_addr32[3] = 0;
-		}
+	case ADDRESS_IP:
+		break;
 	}
 }
 
-static FORCE_INLINE __u16 fill_port(struct __sk_buff *skb, enum address_specifier addr, enum port_gen type)
+static FORCE_INLINE void fill_ipv6(struct in6_addr *ip, struct __sk_buff *skb, enum address_gen type, enum address_specifier spec)
 {
-	if (type == PORT_WILDCARD) {
-		return 0;
-	}
-	if (addr == DEST) {
-		// assuming TCP or UDP, offsets 2-3 of L4 are dport
-		return load_half(skb, BPF_NET_OFF + sizeof(struct iphdr) + 2);
-	}
+	__u64 off = spec == SOURCE ? offsetof(struct ip6_hdr, ip6_src) : offsetof(struct ip6_hdr, ip6_dst);
 
-	return load_half(skb, BPF_NET_OFF + sizeof(struct iphdr));
-}
+	bpf_skb_load_bytes(skb, off, ip, sizeof(*ip));
 
-static FORCE_INLINE void generalise(struct __sk_buff *skb, const struct gen *gen, struct packet_element *element)
-{
-	fill_ip(&element->source_address, skb, gen->source, SOURCE);
-	fill_ip(&element->destination_address, skb, gen->dest, DEST);
-	element->source_port      = fill_port(skb, SOURCE, gen->source_port);
-	element->destination_port = fill_port(skb, DEST, gen->dest_port);
+	// 16: 0    1    2    3    4    5    6    7
+	// 32: 0         1         2         3
+	// /48 ffff ffff ffff 0000 0000 0000 0000 0000
+	// /64 ffff ffff ffff ffff 0000 0000 0000 0000
+	if (type == ADDRESS_NET) {
+		ip->s6_addr16[3] = 0;
+		ip->s6_addr32[2] = 0;
+		ip->s6_addr32[3] = 0;
+	} else if (type == ADDRESS_IP && spec == SOURCE) {
+		ip->s6_addr32[2] = 0;
+		ip->s6_addr32[3] = 0;
+	}
 }
 
 static FORCE_INLINE int drop_or_accept(__u32 level, fpoint limit, __u32 max_rate, __u32 rand)
@@ -216,22 +197,50 @@ static FORCE_INLINE fpoint estimate_max_rate(fpoint max_rate, __u64 ts, __u32 no
 	return max_rate;
 }
 
-static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts, __u32 rand)
+static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64 ts, __u32 rand)
 {
-	struct packet_element element = {0};
-	fpoint max_rate               = 0;
-	fpoint limit                  = to_fixed_point(LIMIT, 0);
+	struct packet pkt = {0};
+	fpoint max_rate   = 0;
+	fpoint limit      = to_fixed_point(LIMIT, 0);
 
 	if (limit == 0) {
 		return SKB_PASS;
+	}
+
+	__u64 troff;
+	switch (proto) {
+	case ETH_P_IP:
+		troff = transport_offset_ipv4(skb);
+		break;
+
+	case ETH_P_IPV6:
+		troff = transport_offset_ipv6(skb);
+		break;
+
+	default:
+		return SKB_REJECT;
 	}
 
 #pragma clang loop unroll(full)
 	for (int i = 0; i < ARRAY_SIZE(generalisations); i++) {
 		const struct gen *gen = &generalisations[i];
 
-		generalise(skb, gen, &element);
-		max_rate = estimate_max_rate(max_rate, ts, i, &element, sizeof(element));
+		pkt.source_port      = (gen->source_port == PORT_WILDCARD) ? 0 : load_half(skb, troff);
+		pkt.destination_port = (gen->dest_port == PORT_WILDCARD) ? 0 : load_half(skb, troff + 2);
+
+		switch (proto) {
+		case ETH_P_IP:
+			fill_ipv4(&pkt.ipv4.source_address, skb, gen->source, SOURCE);
+			fill_ipv4(&pkt.ipv4.destination_address, skb, gen->dest, DEST);
+			max_rate = estimate_max_rate(max_rate, ts, i, &pkt, offsetofend(struct packet, ipv4));
+			break;
+
+		case ETH_P_IPV6:
+			fill_ipv6(&pkt.ipv6.source_address, skb, gen->source, SOURCE);
+			fill_ipv6(&pkt.ipv6.destination_address, skb, gen->dest, DEST);
+			max_rate = estimate_max_rate(max_rate, ts, i, &pkt, offsetofend(struct packet, ipv6));
+			break;
+		}
 
 		if (gen->evaluate) {
 			if (max_rate > limit) {
@@ -245,13 +254,10 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts, __u32 ra
 	return SKB_PASS;
 }
 
-// prod_anchor is the production entrypoint.
-// it determines the current time and then calls on
-// process_packet
-SEC("socket/prod")
-int prod_anchor(struct __sk_buff *skb)
+SEC("socket/ipv4")
+int filter_ipv4(struct __sk_buff *skb)
 {
-	return process_packet(skb, bpf_ktime_get_ns(), bpf_get_prandom_u32());
+	return process_packet(skb, ETH_P_IP, bpf_ktime_get_ns(), bpf_get_prandom_u32());
 }
 
 // a map used for testing
@@ -287,7 +293,7 @@ int test_anchor(struct __sk_buff *skb)
 		rand = *randp;
 	}
 
-	return process_packet(skb, *ts, rand);
+	return process_packet(skb, ETH_P_IP, *ts, rand);
 }
 
 // test_fp_cmp takes the element with the index 0 out of the test_single_result map, and

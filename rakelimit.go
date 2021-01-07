@@ -51,7 +51,7 @@ func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 			opErr = fmt.Errorf("only IPv4 is supported")
 			return
 		}
-		opErr = unix.SetsockoptInt(int(s), unix.SOL_SOCKET, unix.SO_ATTACH_BPF, programSpecs.ProgramProdAnchor.FD())
+		opErr = unix.SetsockoptInt(int(s), unix.SOL_SOCKET, unix.SO_ATTACH_BPF, programSpecs.ProgramFilterIpv4.FD())
 		if opErr != nil {
 			opErr = fmt.Errorf("can't attach BPF to socket: %s", opErr)
 		}

@@ -1,13 +1,13 @@
 #pragma once
 
+#include <in.h>
 #include <linux/types.h>
 
 // musl license: https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
 
 // from musl: include/netinet/ip.h
 struct iphdr {
-	unsigned int ihl : 4;
-	unsigned int version : 4;
+	__u8 version_ihl;
 	__u8 tos;
 	__u16 tot_len;
 	__u16 id;
@@ -17,15 +17,6 @@ struct iphdr {
 	__u16 check;
 	__u32 saddr;
 	__u32 daddr;
-};
-
-// from musl: include/netinet/in6.h
-struct in6_addr {
-	union {
-		__u8 s6_addr[16];
-		__u16 s6_addr16[8];
-		__u32 s6_addr32[4];
-	};
 };
 
 // from musl: include/netinet/ip6.h
