@@ -60,7 +60,9 @@ func (el *element) String() string {
 
 func (el *element) marshal() []byte {
 	buf := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{}
+	opts := gopacket.SerializeOptions{
+		FixLengths: true,
+	}
 	gopacket.SerializeLayers(buf, opts,
 		&layers.Ethernet{
 			SrcMAC:       []byte{1, 2, 3, 4, 5, 6},
@@ -68,6 +70,7 @@ func (el *element) marshal() []byte {
 			EthernetType: layers.EthernetTypeIPv4,
 		},
 		&layers.IPv4{
+			Version:  4,
 			SrcIP:    el.SourceAddress,
 			DstIP:    el.DestinationAddress,
 			Protocol: layers.IPProtocolUDP,
@@ -330,7 +333,7 @@ func TestAttackPropagation(t *testing.T) {
 		}
 
 		if packet.key == "legit" && verdict == 0 {
-			t.Errorf("Dropped legitimate packet #%d: %v", i, rake.mustMetrics(t).DroppedPacketsPerLevel)
+			t.Fatalf("Dropped legitimate packet #%d: %v", i, rake.mustMetrics(t).DroppedPacketsPerLevel)
 		}
 	}
 }

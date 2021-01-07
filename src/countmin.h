@@ -7,7 +7,6 @@
 #include "ewma.h"
 #include "fasthash.h"
 #include "fixed-point.h"
-#include "packet_element.h"
 
 // countmin sketch paper: http://dimacs.rutgers.edu/~graham/pubs/papers/cm-full.pdf
 // the error in answering the query is within an error epsilon with probability (1-gamma) (page 5, 6)
