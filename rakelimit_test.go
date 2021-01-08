@@ -66,6 +66,12 @@ func TestBPFFloatToFixedPoint(t *testing.T) {
 }
 
 func TestBPFFEwma(t *testing.T) {
+	const (
+		rateKey uint32 = iota
+		oldTSKey
+		newTSKey
+	)
+
 	rakeLimitSpec, err := newRakeSpecs()
 	if err != nil {
 		t.Fatal("Can't get elf spec", err)
@@ -78,24 +84,27 @@ func TestBPFFEwma(t *testing.T) {
 	defer programSpecs.Close()
 
 	prog := programSpecs.ProgramTestEwma
-
 	sr := programSpecs.MapTestSingleResult
 
-	sr.Put(uint32(0), uint64(4294967296000))
-	sr.Put(uint32(1), uint64(time.Millisecond))
+	sr.Put(rateKey, uint64(50))
+	sr.Put(oldTSKey, uint64(346534651))
+	sr.Put(newTSKey, uint64(415841581))
 
-	payload := make([]byte, 14)
-
-	ret, _, err := prog.Test(payload)
+	ret, _, err := prog.Test(make([]byte, 14))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ret == 0 {
 		t.Fatal("Unexpected return from BPF program")
 	}
+
 	var result uint64
-	if err := sr.Lookup(uint32(0), &result); err != nil {
+	if err := sr.Lookup(rateKey, &result); err != nil {
 		t.Fatal(err)
+	}
+
+	if result != 25 {
+		t.Error("Expected 25, got", result)
 	}
 }
 

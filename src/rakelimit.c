@@ -258,7 +258,7 @@ struct bpf_map_def SEC("maps") test_single_result = {
 	.type        = BPF_MAP_TYPE_ARRAY,
 	.key_size    = sizeof(__u32),
 	.value_size  = sizeof(__u64),
-	.max_entries = 2,
+	.max_entries = 3,
 };
 
 // test_anchor_fn reads a timestamp from index 0
@@ -315,23 +315,28 @@ int test_fp_cmp(struct __sk_buff *skb)
 	return SKB_PASS;
 }
 
-// test_ewma takes a previous rate from index 0 (as a fixed point)
-// and a duration from index 1 (as an integer), estimates the current rate
-// based on both and writes the result as a fixed point at index 1
+// test_ewma takes a previous rate from index 0 (as a u32) and an old and
+// new timestamp from index 1-2 (as u64) and estimates the current rate.
+// The result is written to the previous rate.
 SEC("socket/test2")
 int test_ewma(struct __sk_buff *skb)
 {
-	int i        = 0;
-	__u64 *value = bpf_map_lookup_elem(&test_single_result, &i);
-	if (value == NULL) {
+	__u64 *old_rate = bpf_map_lookup_elem(&test_single_result, &(__u32){0});
+	if (old_rate == NULL) {
 		return SKB_REJECT;
 	}
-	i          = 1;
-	__u64 *dur = bpf_map_lookup_elem(&test_single_result, &i);
-	if (dur == NULL) {
+
+	__u64 *old_ts = bpf_map_lookup_elem(&test_single_result, &(__u32){1});
+	if (old_ts == NULL) {
 		return SKB_REJECT;
 	}
-	*value = estimate_rate(*value, 0, *dur);
+
+	__u64 *now = bpf_map_lookup_elem(&test_single_result, &(__u32){2});
+	if (now == NULL) {
+		return SKB_REJECT;
+	}
+
+	*old_rate = estimate_rate(*old_rate, *old_ts, *now);
 	return SKB_PASS;
 }
 
