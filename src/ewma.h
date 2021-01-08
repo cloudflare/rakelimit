@@ -34,14 +34,8 @@ static __u32 FORCE_INLINE estimate_rate(__u32 old_rate, __u64 old_ts, __u64 now)
 		return rate_current;
 	}
 
-	fpoint a        = div_by_int(to_fixed_point(elapsed, 0), WINDOW_NS);
-	fpoint new_rate = to_fixed_point(rate_current, 0);
+	const fpoint one = to_fixed_point(1, 0);
+	fpoint a         = div_by_int(to_fixed_point(elapsed, 0), WINDOW_NS);
 
-	if (old_rate > rate_current) {
-		new_rate -= a * (old_rate - rate_current);
-	} else {
-		new_rate += a * (rate_current - old_rate);
-	}
-
-	return to_int(new_rate);
+	return to_int(a * rate_current + (one - a) * old_rate);
 }
