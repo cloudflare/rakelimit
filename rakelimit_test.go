@@ -163,6 +163,7 @@ type testRakelimit struct {
 const (
 	timeArgKey uint32 = iota
 	randArgKey
+	rateExceededOnLevelKey
 )
 
 func mustNew(tb testing.TB, limit uint32) *testRakelimit {
@@ -209,4 +210,15 @@ func (trl *testRakelimit) updateRand(tb testing.TB, value uint32) {
 	if err := trl.args.Put(randArgKey, uint64(value)); err != nil {
 		tb.Error("Can't update rand:", err)
 	}
+}
+
+func (trl *testRakelimit) rateExceededOnLevel(tb testing.TB) uint32 {
+	tb.Helper()
+
+	var level uint64
+	if err := trl.args.Lookup(rateExceededOnLevelKey, &level); err != nil {
+		tb.Fatal("Can't lookup drop level:", err)
+	}
+
+	return uint32(level)
 }
