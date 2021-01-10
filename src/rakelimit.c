@@ -186,7 +186,7 @@ static FORCE_INLINE int drop_or_accept(__u32 level, fpoint limit, __u32 max_rate
 	return SKB_PASS;
 }
 
-static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64 ts, __u32 rand)
+static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64 ts, __u32 rand, __u64 *rate_exceeded_level)
 {
 	struct packet pkt = {0};
 	__u32 max_rate    = 0;
@@ -237,6 +237,9 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64
 
 		if (gen->evaluate) {
 			if (max_rate > LIMIT) {
+				if (rate_exceeded_level != NULL) {
+					*rate_exceeded_level = gen_level(gen);
+				}
 				return drop_or_accept(gen_level(gen), LIMIT, max_rate, rand);
 			}
 
@@ -250,7 +253,7 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64
 SEC("socket/ipv4")
 int filter_ipv4(struct __sk_buff *skb)
 {
-	return process_packet(skb, ETH_P_IP, bpf_ktime_get_ns(), bpf_get_prandom_u32());
+	return process_packet(skb, ETH_P_IP, bpf_ktime_get_ns(), bpf_get_prandom_u32(), NULL);
 }
 
 // a map used for testing
@@ -267,7 +270,7 @@ struct bpf_map_def SEC("maps") test_single_result = {
 SEC("socket/test")
 int test_anchor(struct __sk_buff *skb)
 {
-	__u64 *ts, *randp;
+	__u64 *ts, *randp, *rate_exceeded_level;
 	__u32 rand;
 
 	ts = bpf_map_lookup_elem(&test_single_result, &(__u32){0});
@@ -286,7 +289,15 @@ int test_anchor(struct __sk_buff *skb)
 		rand = *randp;
 	}
 
-	return process_packet(skb, ETH_P_IP, *ts, rand);
+	rate_exceeded_level = bpf_map_lookup_elem(&test_single_result, &(__u32){2});
+	if (rate_exceeded_level == NULL) {
+		return SKB_PASS;
+	}
+
+	// Always reset the level to some weird value that isn't zero.
+	*rate_exceeded_level = -1;
+
+	return process_packet(skb, ETH_P_IP, *ts, rand, rate_exceeded_level);
 }
 
 // test_fp_cmp takes the element with the index 0 out of the test_single_result map, and

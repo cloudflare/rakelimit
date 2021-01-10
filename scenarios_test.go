@@ -202,12 +202,16 @@ func TestRate(t *testing.T) {
 	})
 
 	var accepted int
-	for _, packet := range packets {
+	for i, packet := range packets {
 		rake.updateTime(t, packet.received)
 
 		verdict, _, err := rake.program.Test(packet.element)
 		if err != nil {
 			t.Fatal(err)
+		}
+
+		if level := rake.rateExceededOnLevel(t); i > 0 && level != 0 {
+			t.Fatalf("Packet is matched on level %d instead of 0", level)
 		}
 
 		if verdict > 0 {
@@ -291,6 +295,11 @@ func TestGeneralisations(t *testing.T) {
 				if verdict > 0 {
 					t.Fatalf("Accepted packet #%d", i)
 				}
+
+				level := rake.rateExceededOnLevel(t)
+				if level != gen.level {
+					t.Fatalf("Packet #%d was dropped on level %d instead of %d", i, level, gen.level)
+				}
 			}
 		})
 	}
@@ -333,7 +342,7 @@ func TestAttackPropagation(t *testing.T) {
 		}
 
 		if packet.key == "legit" && verdict == 0 {
-			t.Fatalf("Dropped legitimate packet #%d: %v", i, rake.mustMetrics(t).DroppedPacketsPerLevel)
+			t.Fatalf("Dropped legitimate packet #%d: %v", i, rake.rateExceededOnLevel(t))
 		}
 	}
 }
