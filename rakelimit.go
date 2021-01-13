@@ -1,6 +1,7 @@
 package rakelimit
 
 import (
+	"errors"
 	"fmt"
 	"syscall"
 
@@ -31,7 +32,7 @@ func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 
 	programSpecs, err := rakelimitSpec.Load(nil)
 	if err != nil {
-		return nil, fmt.Errorf("Can't load BPF program: %v", err)
+		return nil, fmt.Errorf("load BPF: %v", err)
 	}
 
 	raw, err := conn.SyscallConn()
@@ -52,8 +53,12 @@ func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 			return
 		}
 		opErr = unix.SetsockoptInt(int(s), unix.SOL_SOCKET, unix.SO_ATTACH_BPF, programSpecs.ProgramFilterIpv4.FD())
+		if errors.Is(opErr, unix.ENOMEM) {
+			opErr = fmt.Errorf("attach filter: net.core.optmem_max might be too low: %s", opErr)
+			return
+		}
 		if opErr != nil {
-			opErr = fmt.Errorf("can't attach BPF to socket: %s", opErr)
+			opErr = fmt.Errorf("attach filter: %s", opErr)
 		}
 	}); err != nil {
 		return nil, fmt.Errorf("can't access fd: %s", err)
