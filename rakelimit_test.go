@@ -103,8 +103,8 @@ func TestBPFFEwma(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result != 25 {
-		t.Error("Expected 25, got", result)
+	if result != 31 {
+		t.Error("Expected 31, got", result)
 	}
 }
 
