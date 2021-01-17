@@ -9,11 +9,8 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"golang.org/x/sys/unix"
 )
-
-func TestNew(t *testing.T) {
-	mustNew(t, 1000)
-}
 
 const floatBits = 32
 
@@ -109,9 +106,9 @@ func TestBPFFEwma(t *testing.T) {
 }
 
 func BenchmarkRakelimit(b *testing.B) {
-	limit := mustNew(b, math.MaxUint32)
-
 	b.Run("IPv4", func(b *testing.B) {
+		rake := mustNew(b, "127.0.0.1:0", math.MaxUint32)
+
 		packet := mustSerializeLayers(b,
 			&layers.Ethernet{
 				SrcMAC:       []byte{1, 2, 3, 4, 5, 6},
@@ -119,6 +116,7 @@ func BenchmarkRakelimit(b *testing.B) {
 				EthernetType: layers.EthernetTypeIPv4,
 			},
 			&layers.IPv4{
+				Version:  4,
 				SrcIP:    net.IPv4(192, 0, 2, 0),
 				DstIP:    net.IPv4(192, 0, 2, 123),
 				Protocol: layers.IPProtocolUDP,
@@ -131,9 +129,48 @@ func BenchmarkRakelimit(b *testing.B) {
 		)
 		b.ResetTimer()
 
-		_, duration, err := limit.bpfObjects.ProgramFilterIpv4.Benchmark(packet, b.N, b.ResetTimer)
+		lastRet, duration, err := rake.program.Benchmark(packet, b.N, b.ResetTimer)
 		if err != nil {
 			b.Fatal(err)
+		}
+
+		if lastRet == 0 {
+			b.Error("Packet was dropped")
+		}
+
+		b.ReportMetric(float64(duration/time.Nanosecond), "ns/op")
+	})
+
+	b.Run("IPv6", func(b *testing.B) {
+		rake := mustNew(b, "[::1]:0", math.MaxUint32)
+
+		packet := mustSerializeLayers(b,
+			&layers.Ethernet{
+				SrcMAC:       []byte{1, 2, 3, 4, 5, 6},
+				DstMAC:       []byte{6, 5, 4, 3, 2, 1},
+				EthernetType: layers.EthernetTypeIPv6,
+			},
+			&layers.IPv6{
+				Version:    6,
+				SrcIP:      net.ParseIP("fd::1"),
+				DstIP:      net.ParseIP("fc::1337"),
+				NextHeader: layers.IPProtocolUDP,
+			},
+			&layers.UDP{
+				SrcPort: layers.UDPPort(12345),
+				DstPort: layers.UDPPort(443),
+			},
+			gopacket.Payload([]byte{1, 2, 3, 4}),
+		)
+		b.ResetTimer()
+
+		lastRet, duration, err := rake.program.Benchmark(packet, b.N, b.ResetTimer)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		if lastRet == 0 {
+			b.Error("Packet was dropped")
 		}
 
 		b.ReportMetric(float64(duration/time.Nanosecond), "ns/op")
@@ -144,7 +181,9 @@ func mustSerializeLayers(tb testing.TB, layers ...gopacket.SerializableLayer) []
 	tb.Helper()
 
 	buf := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{}
+	opts := gopacket.SerializeOptions{
+		FixLengths: true,
+	}
 	err := gopacket.SerializeLayers(buf, opts, layers...)
 	if err != nil {
 		tb.Fatal("Can't serialize layers:", err)
@@ -155,9 +194,9 @@ func mustSerializeLayers(tb testing.TB, layers ...gopacket.SerializableLayer) []
 
 type testRakelimit struct {
 	*Rakelimit
-	program *ebpf.Program
-	args    *ebpf.Map
-	conn    *net.UDPConn
+	testProgram *ebpf.Program
+	args        *ebpf.Map
+	conn        *net.UDPConn
 }
 
 const (
@@ -166,10 +205,10 @@ const (
 	rateExceededOnLevelKey
 )
 
-func mustNew(tb testing.TB, limit uint32) *testRakelimit {
+func mustNew(tb testing.TB, addr string, limit uint32) *testRakelimit {
 	tb.Helper()
 
-	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	conn, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		tb.Fatal("Can't listen:", err)
 	}
@@ -182,12 +221,17 @@ func mustNew(tb testing.TB, limit uint32) *testRakelimit {
 	}
 	tb.Cleanup(func() { rake.Close() })
 
+	prog := rake.bpfObjects.ProgramTestIpv4
+	if rake.domain == unix.AF_INET6 {
+		prog = rake.bpfObjects.ProgramTestIpv6
+	}
+
 	args := rake.bpfObjects.MapTestSingleResult
 	if err := args.Put(randArgKey, uint64(math.MaxUint32+1)); err != nil {
 		tb.Fatal("Can't update rand:", err)
 	}
 
-	return &testRakelimit{rake, rake.bpfObjects.ProgramTestAnchor, args, udp}
+	return &testRakelimit{rake, prog, args, udp}
 }
 
 func (trl *testRakelimit) updateTime(tb testing.TB, now uint64) {

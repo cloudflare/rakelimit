@@ -15,7 +15,7 @@
 static volatile const __u32 LIMIT;
 
 enum address_gen {
-	ADDRESS_IP       = 0, // /32 or /64
+	ADDRESS_IP       = 0, // /32 or /128
 	ADDRESS_NET      = 1, // /24 or /48
 	ADDRESS_WILDCARD = 2, // /0
 };
@@ -141,6 +141,11 @@ static FORCE_INLINE void fill_ipv4(struct in_addr *ip, struct __sk_buff *skb, en
 {
 	__u64 off = spec == SOURCE ? offsetof(struct iphdr, saddr) : offsetof(struct iphdr, daddr);
 
+	if (type == ADDRESS_WILDCARD) {
+		ip->s_addr = 0;
+		return;
+	}
+
 	ip->s_addr = load_word(skb, BPF_NET_OFF + off);
 
 	switch (type) {
@@ -148,11 +153,8 @@ static FORCE_INLINE void fill_ipv4(struct in_addr *ip, struct __sk_buff *skb, en
 		ip->s_addr &= 0xffffff00;
 		break;
 
-	case ADDRESS_WILDCARD:
-		ip->s_addr = 0;
-		break;
-
-	case ADDRESS_IP:
+	case ADDRESS_WILDCARD: // Already handled above.
+	case ADDRESS_IP:       // Nothing to do.
 		break;
 	}
 }
@@ -161,19 +163,28 @@ static FORCE_INLINE void fill_ipv6(struct in6_addr *ip, struct __sk_buff *skb, e
 {
 	__u64 off = spec == SOURCE ? offsetof(struct ip6_hdr, ip6_src) : offsetof(struct ip6_hdr, ip6_dst);
 
+	if (type == ADDRESS_WILDCARD) {
+		*ip = (struct in6_addr){0};
+		return;
+	}
+
+	// TODO: This can return an error.
 	bpf_skb_load_bytes(skb, off, ip, sizeof(*ip));
 
 	// 16: 0    1    2    3    4    5    6    7
 	// 32: 0         1         2         3
 	// /48 ffff ffff ffff 0000 0000 0000 0000 0000
 	// /64 ffff ffff ffff ffff 0000 0000 0000 0000
-	if (type == ADDRESS_NET) {
+	switch (type) {
+	case ADDRESS_NET:
 		ip->s6_addr16[3] = 0;
 		ip->s6_addr32[2] = 0;
 		ip->s6_addr32[3] = 0;
-	} else if (type == ADDRESS_IP && spec == SOURCE) {
-		ip->s6_addr32[2] = 0;
-		ip->s6_addr32[3] = 0;
+		break;
+
+	case ADDRESS_WILDCARD: // Already handled above.
+	case ADDRESS_IP:       // Nothing to do.
+		break;
 	}
 }
 
@@ -256,6 +267,12 @@ int filter_ipv4(struct __sk_buff *skb)
 	return process_packet(skb, ETH_P_IP, bpf_ktime_get_ns(), bpf_get_prandom_u32(), NULL);
 }
 
+SEC("socket/ipv6")
+int filter_ipv6(struct __sk_buff *skb)
+{
+	return process_packet(skb, ETH_P_IPV6, bpf_ktime_get_ns(), bpf_get_prandom_u32(), NULL);
+}
+
 // a map used for testing
 struct bpf_map_def SEC("maps") test_single_result = {
 	.type        = BPF_MAP_TYPE_ARRAY,
@@ -264,11 +281,7 @@ struct bpf_map_def SEC("maps") test_single_result = {
 	.max_entries = 3,
 };
 
-// test_anchor_fn reads a timestamp from index 0
-// and then continues with the normal execution using
-// process packet
-SEC("socket/test")
-int test_anchor(struct __sk_buff *skb)
+static FORCE_INLINE int test_filter(struct __sk_buff *skb, __u16 proto)
 {
 	__u64 *ts, *randp, *rate_exceeded_level;
 	__u32 rand;
@@ -297,7 +310,19 @@ int test_anchor(struct __sk_buff *skb)
 	// Always reset the level to some weird value that isn't zero.
 	*rate_exceeded_level = -1;
 
-	return process_packet(skb, ETH_P_IP, *ts, rand, rate_exceeded_level);
+	return process_packet(skb, proto, *ts, rand, rate_exceeded_level);
+}
+
+SEC("socket/test_ipv4")
+int test_ipv4(struct __sk_buff *skb)
+{
+	return test_filter(skb, ETH_P_IP);
+}
+
+SEC("socket/test_ipv6")
+int test_ipv6(struct __sk_buff *skb)
+{
+	return test_filter(skb, ETH_P_IPV6);
 }
 
 // test_fp_cmp takes the element with the index 0 out of the test_single_result map, and

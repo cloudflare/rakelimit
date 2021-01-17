@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"syscall"
 
+	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
 
@@ -12,6 +13,8 @@ import (
 
 // Rakelimit holds an instance of a ratelimiter that can be applied on a socket
 type Rakelimit struct {
+	domain     int
+	program    *ebpf.Program
 	bpfObjects *rakeObjects
 }
 
@@ -30,7 +33,7 @@ func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 		return nil, fmt.Errorf("Can't rewrite limit: %v", err)
 	}
 
-	programSpecs, err := rakelimitSpec.Load(nil)
+	objs, err := rakelimitSpec.Load(nil)
 	if err != nil {
 		return nil, fmt.Errorf("load BPF: %v", err)
 	}
@@ -41,18 +44,26 @@ func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 	}
 
 	var opErr error
+	var domain int
+	var prog *ebpf.Program
 	if err := raw.Control(func(s uintptr) {
-		var domain int
 		domain, opErr = unix.GetsockoptInt(int(s), unix.SOL_SOCKET, unix.SO_DOMAIN)
 		if opErr != nil {
 			opErr = fmt.Errorf("can't retrieve domain: %s", opErr)
 			return
 		}
-		if domain != unix.AF_INET {
-			opErr = fmt.Errorf("only IPv4 is supported")
+
+		switch domain {
+		case unix.AF_INET:
+			prog = objs.ProgramFilterIpv4
+		case unix.AF_INET6:
+			prog = objs.ProgramFilterIpv6
+		default:
+			opErr = fmt.Errorf("unsupported socket domain: %d", domain)
 			return
 		}
-		opErr = unix.SetsockoptInt(int(s), unix.SOL_SOCKET, unix.SO_ATTACH_BPF, programSpecs.ProgramFilterIpv4.FD())
+
+		opErr = unix.SetsockoptInt(int(s), unix.SOL_SOCKET, unix.SO_ATTACH_BPF, prog.FD())
 		if errors.Is(opErr, unix.ENOMEM) {
 			opErr = fmt.Errorf("attach filter: net.core.optmem_max might be too low: %s", opErr)
 			return
@@ -67,7 +78,7 @@ func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 		return nil, opErr
 	}
 
-	return &Rakelimit{bpfObjects: programSpecs}, nil
+	return &Rakelimit{domain, prog, objs}, nil
 }
 
 // Close cleans up resources occupied and should be called when finished using the structure

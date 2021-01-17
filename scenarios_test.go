@@ -59,28 +59,52 @@ func (el *element) String() string {
 }
 
 func (el *element) marshal() []byte {
+	var packet []gopacket.SerializableLayer
+	if len(el.SourceAddress) == net.IPv4len {
+		packet = []gopacket.SerializableLayer{
+			&layers.Ethernet{
+				SrcMAC:       []byte{1, 2, 3, 4, 5, 6},
+				DstMAC:       []byte{6, 5, 4, 3, 2, 1},
+				EthernetType: layers.EthernetTypeIPv4,
+			},
+			&layers.IPv4{
+				Version:  4,
+				SrcIP:    el.SourceAddress,
+				DstIP:    el.DestinationAddress,
+				Protocol: layers.IPProtocolUDP,
+			},
+			&layers.UDP{
+				SrcPort: layers.UDPPort(el.SourcePort),
+				DstPort: layers.UDPPort(el.DestinationPort),
+			},
+			gopacket.Payload([]byte{1, 2, 3, 4}),
+		}
+	} else {
+		packet = []gopacket.SerializableLayer{
+			&layers.Ethernet{
+				SrcMAC:       []byte{1, 2, 3, 4, 5, 6},
+				DstMAC:       []byte{6, 5, 4, 3, 2, 1},
+				EthernetType: layers.EthernetTypeIPv6,
+			},
+			&layers.IPv6{
+				Version:    6,
+				SrcIP:      el.SourceAddress,
+				DstIP:      el.DestinationAddress,
+				NextHeader: layers.IPProtocolUDP,
+			},
+			&layers.UDP{
+				SrcPort: layers.UDPPort(el.SourcePort),
+				DstPort: layers.UDPPort(el.DestinationPort),
+			},
+			gopacket.Payload([]byte{1, 2, 3, 4}),
+		}
+	}
+
 	buf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{
 		FixLengths: true,
 	}
-	gopacket.SerializeLayers(buf, opts,
-		&layers.Ethernet{
-			SrcMAC:       []byte{1, 2, 3, 4, 5, 6},
-			DstMAC:       []byte{6, 5, 4, 3, 2, 1},
-			EthernetType: layers.EthernetTypeIPv4,
-		},
-		&layers.IPv4{
-			Version:  4,
-			SrcIP:    el.SourceAddress,
-			DstIP:    el.DestinationAddress,
-			Protocol: layers.IPProtocolUDP,
-		},
-		&layers.UDP{
-			SrcPort: layers.UDPPort(el.SourcePort),
-			DstPort: layers.UDPPort(el.DestinationPort),
-		},
-		gopacket.Payload([]byte{1, 2, 3, 4}),
-	)
+	gopacket.SerializeLayers(buf, opts, packet...)
 	return buf.Bytes()
 }
 
@@ -122,12 +146,15 @@ func generatePackets(duration time.Duration, specs ...packetSpec) []packet {
 	})
 
 	rng := rand.New(rand.NewSource(seed))
+	incompleteIP := func(ip net.IP) bool {
+		return len(ip) != net.IPv4len && len(ip) != net.IPv6len
+	}
 
 	var packets []packet
 	var prev element
 	for _, step := range steps {
 		source := step.SourceAddress
-		if len(source) < net.IPv4len {
+		if incompleteIP(source) {
 			source = randomIP(rng, prev.SourceAddress, source)
 		}
 
@@ -137,7 +164,7 @@ func generatePackets(duration time.Duration, specs ...packetSpec) []packet {
 		}
 
 		dest := step.DestinationAddress
-		if len(dest) < net.IPv4len {
+		if incompleteIP(dest) {
 			dest = randomIP(rng, prev.DestinationAddress, dest)
 		}
 
@@ -172,7 +199,11 @@ func randomPort(rng *rand.Rand, prevPort int) int {
 }
 
 func randomIP(rng *rand.Rand, prevIP net.IP, template net.IP) net.IP {
-	ip := make(net.IP, net.IPv4len)
+	if len(template) == cap(template) {
+		panic(fmt.Sprint("invalid template:", template))
+	}
+
+	ip := make(net.IP, cap(template))
 	copy(ip, template)
 
 	rand.Read(ip[len(template):])
@@ -183,13 +214,19 @@ func randomIP(rng *rand.Rand, prevIP net.IP, template net.IP) net.IP {
 	return ip
 }
 
+func ipTemplate(ip net.IP, ipLen int) net.IP {
+	template := make(net.IP, len(ip), ipLen)
+	copy(template, ip)
+	return template
+}
+
 func TestRate(t *testing.T) {
 	const (
 		duration = 10 * time.Second
 		limit    = 100
 	)
 
-	rake := mustNew(t, limit)
+	rake := mustNew(t, "127.0.0.1:0", limit)
 
 	packets := generatePackets(duration, packetSpec{
 		rate: 2 * limit,
@@ -205,7 +242,7 @@ func TestRate(t *testing.T) {
 	for i, packet := range packets {
 		rake.updateTime(t, packet.received)
 
-		verdict, _, err := rake.program.Test(packet.element)
+		verdict, _, err := rake.testProgram.Test(packet.element)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -227,46 +264,68 @@ func TestRate(t *testing.T) {
 
 func TestGeneralisations(t *testing.T) {
 	const (
-		toNet = net.IPv4len - 1 // /24
 		limit = 100
 	)
 
-	src := net.IP{7, 6, 5, 4}
+	ipv6Src := net.ParseIP("1122:3344:5566:7788::aabb")
+	ipv6Dst := net.ParseIP("8877:6655:4433:2211::ffee")
 	srcPort := 53
-	dst := net.IP{1, 2, 3, 4}
 	dstPort := 443
-	wildcard := net.IP{}
 
-	generalisations := []struct {
-		level uint32
+	type testcase struct {
+		level  uint32
+		listen string
 		element
+	}
+
+	var generalisations []testcase
+	for _, proto := range []struct {
+		listen      string
+		src, srcNet net.IP
+		dst         net.IP
+		wildcard    net.IP
 	}{
-		// level 0
-		{0, element{src, srcPort, dst, dstPort}},
+		{
+			"127.0.0.1:0",
+			net.IP{7, 6, 5, 4}, ipTemplate(net.IP{7, 6, 5}, net.IPv4len),
+			net.IP{1, 2, 3, 4},
+			ipTemplate(nil, net.IPv4len),
+		},
+		{
+			"[::1]:0",
+			ipv6Src, ipv6Src[: 64/8 : net.IPv6len],
+			ipv6Dst,
+			ipTemplate(nil, net.IPv6len),
+		},
+	} {
+		generalisations = append(generalisations,
+			// level 0
+			testcase{0, proto.listen, element{proto.src, srcPort, proto.dst, dstPort}},
 
-		// level 1
-		{1, element{src[:toNet], srcPort, dst, dstPort}},
-		{1, element{src, -1, dst, dstPort}},
-		{1, element{src, srcPort, dst, -1}},
+			// level 1
+			testcase{1, proto.listen, element{proto.srcNet, srcPort, proto.dst, dstPort}},
+			testcase{1, proto.listen, element{proto.src, -1, proto.dst, dstPort}},
+			testcase{1, proto.listen, element{proto.src, srcPort, proto.dst, -1}},
 
-		// level 2
-		{2, element{wildcard, srcPort, dst, dstPort}},
-		{2, element{src[:toNet], -1, dst, dstPort}},
-		{2, element{src[:toNet], srcPort, dst, -1}},
-		{2, element{src, -1, dst, -1}},
+			// level 2
+			testcase{2, proto.listen, element{proto.wildcard, srcPort, proto.dst, dstPort}},
+			testcase{2, proto.listen, element{proto.srcNet, -1, proto.dst, dstPort}},
+			testcase{2, proto.listen, element{proto.srcNet, srcPort, proto.dst, -1}},
+			testcase{2, proto.listen, element{proto.src, -1, proto.dst, -1}},
 
-		// level 3
-		{3, element{wildcard, -1, dst, dstPort}},
-		{3, element{wildcard, srcPort, dst, -1}},
-		{3, element{src[:toNet], -1, dst, -1}},
+			// level 3
+			testcase{3, proto.listen, element{proto.wildcard, -1, proto.dst, dstPort}},
+			testcase{3, proto.listen, element{proto.wildcard, srcPort, proto.dst, -1}},
+			testcase{3, proto.listen, element{proto.srcNet, -1, proto.dst, -1}},
 
-		// level 4
-		{4, element{wildcard, -1, dst, -1}},
+			// level 4
+			testcase{4, proto.listen, element{proto.wildcard, -1, proto.dst, -1}},
+		)
 	}
 
 	for _, gen := range generalisations {
 		t.Run(gen.String(), func(t *testing.T) {
-			rake := mustNew(t, limit)
+			rake := mustNew(t, gen.listen, limit)
 
 			// Drop all packets once rate exceeds limit
 			rake.updateRand(t, math.MaxUint32)
@@ -279,7 +338,7 @@ func TestGeneralisations(t *testing.T) {
 			for i, packet := range packets {
 				rake.updateTime(t, packet.received)
 
-				verdict, _, err := rake.program.Test(packet.element)
+				verdict, _, err := rake.testProgram.Test(packet.element)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -331,12 +390,12 @@ func TestAttackPropagation(t *testing.T) {
 		},
 	)
 
-	rake := mustNew(t, limit)
+	rake := mustNew(t, "127.0.0.1:0", limit)
 	rake.updateRand(t, math.MaxUint32)
 	for i, packet := range packets {
 		rake.updateTime(t, packet.received)
 
-		verdict, _, err := rake.program.Test(packet.element)
+		verdict, _, err := rake.testProgram.Test(packet.element)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -353,8 +412,8 @@ func TestFullySpecifiedAttacker(t *testing.T) {
 			key:  "attacker",
 			rate: 100,
 			element: element{
-				SourceAddress:      []byte{7, 6, 5, 4},
-				DestinationAddress: []byte{1, 2, 3, 4},
+				SourceAddress:      net.IP{7, 6, 5, 4},
+				DestinationAddress: net.IP{1, 2, 3, 4},
 				SourcePort:         53,
 				DestinationPort:    443,
 			},
@@ -363,8 +422,8 @@ func TestFullySpecifiedAttacker(t *testing.T) {
 			key:  "insideHH",
 			rate: 5,
 			element: element{
-				SourceAddress:      []byte{7, 6, 5, 1},
-				DestinationAddress: []byte{1, 2, 3, 4},
+				SourceAddress:      net.IP{7, 6, 5, 1},
+				DestinationAddress: net.IP{1, 2, 3, 4},
 				SourcePort:         53,
 				DestinationPort:    443,
 			},
@@ -373,8 +432,8 @@ func TestFullySpecifiedAttacker(t *testing.T) {
 			key:  "outsideHH",
 			rate: 5,
 			element: element{
-				SourceAddress:      []byte{1, 1, 1, 1},
-				DestinationAddress: []byte{6, 7, 8, 9},
+				SourceAddress:      net.IP{1, 1, 1, 1},
+				DestinationAddress: net.IP{6, 7, 8, 9},
 				SourcePort:         10,
 				DestinationPort:    11,
 			},
@@ -383,8 +442,8 @@ func TestFullySpecifiedAttacker(t *testing.T) {
 			key:  "noise",
 			rate: 100,
 			element: element{
-				SourceAddress:      []byte{8, 7},
-				DestinationAddress: []byte{6, 7},
+				SourceAddress:      ipTemplate(net.IP{8, 7}, net.IPv4len),
+				DestinationAddress: ipTemplate(net.IP{6, 7}, net.IPv4len),
 				SourcePort:         -1,
 				DestinationPort:    -1,
 			},
@@ -400,8 +459,8 @@ func TestAttackerSubnet(t *testing.T) {
 			key:  "attacker",
 			rate: 100,
 			element: element{
-				SourceAddress:      []byte{7, 6, 5},
-				DestinationAddress: []byte{1, 2, 3, 4},
+				SourceAddress:      net.IP{7, 6, 5, 0},
+				DestinationAddress: net.IP{1, 2, 3, 4},
 				SourcePort:         53,
 				DestinationPort:    443,
 			},
@@ -410,8 +469,8 @@ func TestAttackerSubnet(t *testing.T) {
 			key:  "insideHH",
 			rate: 5,
 			element: element{
-				SourceAddress:      []byte{7, 6, 5, 1},
-				DestinationAddress: []byte{1, 2, 3, 4},
+				SourceAddress:      net.IP{7, 6, 5, 1},
+				DestinationAddress: net.IP{1, 2, 3, 4},
 				SourcePort:         53,
 				DestinationPort:    443,
 			},
@@ -420,8 +479,8 @@ func TestAttackerSubnet(t *testing.T) {
 			key:  "outsideHH",
 			rate: 5,
 			element: element{
-				SourceAddress:      []byte{1, 1, 1, 1},
-				DestinationAddress: []byte{6, 7, 8, 9},
+				SourceAddress:      net.IP{1, 1, 1, 1},
+				DestinationAddress: net.IP{6, 7, 8, 9},
 				SourcePort:         10,
 				DestinationPort:    11,
 			},
@@ -430,8 +489,8 @@ func TestAttackerSubnet(t *testing.T) {
 			key:  "noise",
 			rate: 100,
 			element: element{
-				SourceAddress:      []byte{8, 9},
-				DestinationAddress: []byte{},
+				SourceAddress:      ipTemplate(net.IP{8, 9}, net.IPv4len),
+				DestinationAddress: ipTemplate(nil, net.IPv4len),
 				SourcePort:         -1,
 				DestinationPort:    -1,
 			},
@@ -447,8 +506,8 @@ func TestAttackerSubnetRandomPort(t *testing.T) {
 			key:  "attacker",
 			rate: 100,
 			element: element{
-				SourceAddress:      []byte{7, 6, 5},
-				DestinationAddress: []byte{1, 2, 3, 4},
+				SourceAddress:      ipTemplate(net.IP{7, 6, 5}, net.IPv4len),
+				DestinationAddress: net.IP{1, 2, 3, 4},
 				SourcePort:         -1,
 				DestinationPort:    443,
 			},
@@ -457,8 +516,8 @@ func TestAttackerSubnetRandomPort(t *testing.T) {
 			key:  "insideHH",
 			rate: 5,
 			element: element{
-				SourceAddress:      []byte{7, 6, 5, 1},
-				DestinationAddress: []byte{1, 2, 3, 4},
+				SourceAddress:      net.IP{7, 6, 5, 1},
+				DestinationAddress: net.IP{1, 2, 3, 4},
 				SourcePort:         53,
 				DestinationPort:    443,
 			},
@@ -467,8 +526,8 @@ func TestAttackerSubnetRandomPort(t *testing.T) {
 			key:  "outsideHH",
 			rate: 5,
 			element: element{
-				SourceAddress:      []byte{1, 1, 1, 1},
-				DestinationAddress: []byte{6, 7, 8, 9},
+				SourceAddress:      net.IP{1, 1, 1, 1},
+				DestinationAddress: net.IP{6, 7, 8, 9},
 				SourcePort:         10,
 				DestinationPort:    11,
 			},
@@ -477,8 +536,8 @@ func TestAttackerSubnetRandomPort(t *testing.T) {
 			key:  "noise",
 			rate: 100,
 			element: element{
-				SourceAddress:      []byte{7, 6},
-				DestinationAddress: []byte{},
+				SourceAddress:      ipTemplate(net.IP{7, 6}, net.IPv4len),
+				DestinationAddress: ipTemplate(nil, net.IPv4len),
 				SourcePort:         -1,
 				DestinationPort:    -1,
 			},
@@ -494,8 +553,8 @@ func TestReflectionAttack(t *testing.T) {
 			key:  "attacker",
 			rate: 100,
 			element: element{
-				SourceAddress:      []byte{},
-				DestinationAddress: []byte{1, 2, 3, 4},
+				SourceAddress:      ipTemplate(nil, net.IPv4len),
+				DestinationAddress: net.IP{1, 2, 3, 4},
 				SourcePort:         53,
 				DestinationPort:    443,
 			},
@@ -504,8 +563,8 @@ func TestReflectionAttack(t *testing.T) {
 			key:  "insideHH",
 			rate: 5,
 			element: element{
-				SourceAddress:      []byte{7, 6, 5, 1},
-				DestinationAddress: []byte{1, 2, 3, 4},
+				SourceAddress:      net.IP{7, 6, 5, 1},
+				DestinationAddress: net.IP{1, 2, 3, 4},
 				SourcePort:         53,
 				DestinationPort:    443,
 			},
@@ -514,8 +573,8 @@ func TestReflectionAttack(t *testing.T) {
 			key:  "outsideHH",
 			rate: 5,
 			element: element{
-				SourceAddress:      []byte{1, 1, 1, 1},
-				DestinationAddress: []byte{6, 7, 8, 9},
+				SourceAddress:      net.IP{1, 1, 1, 1},
+				DestinationAddress: net.IP{6, 7, 8, 9},
 				SourcePort:         10,
 				DestinationPort:    11,
 			},
@@ -524,8 +583,8 @@ func TestReflectionAttack(t *testing.T) {
 			key:  "noise",
 			rate: 100,
 			element: element{
-				SourceAddress:      []byte{},
-				DestinationAddress: []byte{6, 8},
+				SourceAddress:      ipTemplate(nil, net.IPv4len),
+				DestinationAddress: ipTemplate(net.IP{6, 8}, net.IPv4len),
 				SourcePort:         -1,
 				DestinationPort:    -1,
 			},
@@ -541,8 +600,8 @@ func TestDestinationOverload(t *testing.T) {
 			key:  "attacker",
 			rate: 100,
 			element: element{
-				SourceAddress:      []byte{},
-				DestinationAddress: []byte{1, 2, 3, 4},
+				SourceAddress:      ipTemplate(nil, net.IPv4len),
+				DestinationAddress: net.IP{1, 2, 3, 4},
 				SourcePort:         -1,
 				DestinationPort:    443,
 			},
@@ -551,8 +610,8 @@ func TestDestinationOverload(t *testing.T) {
 			key:  "insideHH",
 			rate: 5,
 			element: element{
-				SourceAddress:      []byte{7, 6, 5, 1},
-				DestinationAddress: []byte{1, 2, 3, 4},
+				SourceAddress:      net.IP{7, 6, 5, 1},
+				DestinationAddress: net.IP{1, 2, 3, 4},
 				SourcePort:         53,
 				DestinationPort:    443,
 			},
@@ -561,8 +620,8 @@ func TestDestinationOverload(t *testing.T) {
 			key:  "outsideHH",
 			rate: 5,
 			element: element{
-				SourceAddress:      []byte{1, 1, 1, 1},
-				DestinationAddress: []byte{6, 7, 8, 9},
+				SourceAddress:      net.IP{1, 1, 1, 1},
+				DestinationAddress: net.IP{6, 7, 8, 9},
 				SourcePort:         10,
 				DestinationPort:    11,
 			},
@@ -571,8 +630,8 @@ func TestDestinationOverload(t *testing.T) {
 			key:  "noise",
 			rate: 100,
 			element: element{
-				SourceAddress:      []byte{7, 6},
-				DestinationAddress: []byte{},
+				SourceAddress:      ipTemplate(net.IP{7, 6}, net.IPv4len),
+				DestinationAddress: ipTemplate(nil, net.IPv4len),
 				SourcePort:         -1,
 				DestinationPort:    -1,
 			},
@@ -590,7 +649,7 @@ func runScenario(t *testing.T, rateLimit uint32, traffic []packet) {
 	}
 
 	rates := make(map[string]*perKeyStats)
-	rake := mustNew(t, rateLimit)
+	rake := mustNew(t, "127.0.0.1:0", rateLimit)
 
 	for _, packet := range traffic {
 		stats := rates[packet.key]
@@ -607,7 +666,7 @@ func runScenario(t *testing.T, rateLimit uint32, traffic []packet) {
 		}
 
 		rake.updateTime(t, packet.received)
-		verdict, _, err := rake.program.Test(packet.element)
+		verdict, _, err := rake.testProgram.Test(packet.element)
 		if err != nil {
 			t.Fatal(err)
 		}
