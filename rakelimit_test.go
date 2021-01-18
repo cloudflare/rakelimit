@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
@@ -99,7 +100,7 @@ func TestBPFFEwma(t *testing.T) {
 }
 
 func BenchmarkRakelimit(b *testing.B) {
-	limit, _ := mustNew(b, math.MaxUint32)
+	limit := mustNew(b, math.MaxUint32)
 
 	b.Run("IPv4", func(b *testing.B) {
 		packet := mustSerializeLayers(b,
@@ -143,7 +144,19 @@ func mustSerializeLayers(tb testing.TB, layers ...gopacket.SerializableLayer) []
 	return buf.Bytes()
 }
 
-func mustNew(tb testing.TB, limit uint32) (*Rakelimit, *net.UDPConn) {
+type testRakelimit struct {
+	*Rakelimit
+	program *ebpf.Program
+	args    *ebpf.Map
+	conn    *net.UDPConn
+}
+
+const (
+	timeArgKey uint32 = iota
+	randArgKey
+)
+
+func mustNew(tb testing.TB, limit uint32) *testRakelimit {
 	tb.Helper()
 
 	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
@@ -159,5 +172,32 @@ func mustNew(tb testing.TB, limit uint32) (*Rakelimit, *net.UDPConn) {
 	}
 	tb.Cleanup(func() { rake.Close() })
 
-	return rake, udp
+	args := rake.bpfObjects.MapTestSingleResult
+	if err := args.Put(randArgKey, uint64(math.MaxUint32+1)); err != nil {
+		tb.Fatal("Can't update rand:", err)
+	}
+
+	return &testRakelimit{rake, rake.bpfObjects.ProgramTestAnchor, args, udp}
+}
+
+func (trl *testRakelimit) updateTime(tb testing.TB, now uint64) {
+	tb.Helper()
+
+	if now < math.MaxUint64 {
+		// Make sure we never use a zero time, since the ewma code
+		// assumes that zero means uninitialised.
+		now++
+	}
+
+	if err := trl.args.Put(timeArgKey, now); err != nil {
+		tb.Error("Can't update time:", err)
+	}
+}
+
+func (trl *testRakelimit) updateRand(tb testing.TB, value uint32) {
+	tb.Helper()
+
+	if err := trl.args.Put(randArgKey, uint64(value)); err != nil {
+		tb.Error("Can't update rand:", err)
+	}
 }

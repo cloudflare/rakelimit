@@ -13,6 +13,8 @@
 
 #define NODES 12
 
+static volatile const __u32 LIMIT;
+
 enum address_cidr {
 	ADDRESS_IP       = 0, // /32 or /64
 	ADDRESS_NET      = 1, // /24 or /48
@@ -64,8 +66,6 @@ static FORCE_INLINE void log_level_drop(__u32 level)
 	(*count)++;
 }
 
-static volatile const fpoint limit = 0;
-
 static FORCE_INLINE __u16 skb_proto(const struct __sk_buff *skb)
 {
 	__u32 proto;
@@ -79,7 +79,7 @@ static FORCE_INLINE __u16 skb_proto(const struct __sk_buff *skb)
 	 * instead. Note that we have to use a 32bit load since the field in
 	 * __sk_buff is defined as such.
 	 */
-	asm("%[proto] = *(u32 *)(%[skb] +16)" : [proto] "+r"(proto) : [skb] "r"(skb));
+	asm("%[proto] = *(u32 *)(%[skb] +16)" : [ proto ] "+r"(proto) : [ skb ] "r"(skb));
 	return proto;
 }
 
@@ -154,10 +154,9 @@ static FORCE_INLINE void generalise(struct packet_element *element, struct __sk_
 	element->destination_port = fill_port(skb, DEST, generaliseDestinationPort);
 }
 
-static FORCE_INLINE int drop_or_accept(__u32 level, fpoint limit, fpoint max_rate)
+static FORCE_INLINE int drop_or_accept(__u32 level, fpoint limit, __u32 max_rate, __u32 rand)
 {
-	fpoint rand = bpf_get_prandom_u32();
-	if (div_by_int(limit, max_rate) < rand) {
+	if (div_by_int(limit, max_rate) < to_fixed_point(0, rand)) {
 		log_level_drop(level);
 		return SKB_REJECT;
 	}
@@ -173,10 +172,11 @@ static FORCE_INLINE fpoint estimate_max_rate(fpoint max_rate, __u64 ts, __u32 no
 	return max_rate;
 }
 
-static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts)
+static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts, __u32 rand)
 {
 	struct packet_element element = {0};
 	fpoint max_rate               = 0;
+	fpoint limit                  = to_fixed_point(LIMIT, 0);
 
 	// get rate limit
 	__u32 i = 0;
@@ -189,7 +189,7 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts)
 	max_rate = estimate_max_rate(max_rate, ts, 0, &element);
 
 	if (max_rate > limit) {
-		return drop_or_accept(0, limit, max_rate);
+		return drop_or_accept(0, limit, to_int(max_rate), rand);
 	}
 
 	/* level 1 */
@@ -203,7 +203,7 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts)
 	max_rate = estimate_max_rate(max_rate, ts, 3, &element);
 
 	if (max_rate > limit) {
-		return drop_or_accept(1, limit, max_rate);
+		return drop_or_accept(1, limit, to_int(max_rate), rand);
 	}
 
 	/* level 2 */
@@ -224,7 +224,7 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts)
 	max_rate = estimate_max_rate(max_rate, ts, 7, &element);
 
 	if (max_rate > limit) {
-		return drop_or_accept(2, limit, max_rate);
+		return drop_or_accept(2, limit, to_int(max_rate), rand);
 	}
 
 	/* level 3 */
@@ -241,14 +241,14 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts)
 	max_rate = estimate_max_rate(max_rate, ts, 10, &element);
 
 	if (max_rate > limit) {
-		return drop_or_accept(3, limit, max_rate);
+		return drop_or_accept(3, limit, to_int(max_rate), rand);
 	}
 
 	/* level 4 */
 	generalise(&element, skb, ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD);
 	max_rate = estimate_max_rate(max_rate, ts, 11, &element);
 	if (max_rate > limit) {
-		return drop_or_accept(4, limit, max_rate);
+		return drop_or_accept(4, limit, to_int(max_rate), rand);
 	}
 	return SKB_PASS;
 }
@@ -259,8 +259,7 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts)
 SEC("socket/prod")
 int prod_anchor(struct __sk_buff *skb)
 {
-	__u64 ts = bpf_ktime_get_ns();
-	return process_packet(skb, ts);
+	return process_packet(skb, bpf_ktime_get_ns(), bpf_get_prandom_u32());
 }
 
 // a map used for testing
@@ -277,14 +276,26 @@ struct bpf_map_def SEC("maps") test_single_result = {
 SEC("socket/test")
 int test_anchor(struct __sk_buff *skb)
 {
-	__u64 *ts;
-	__u32 i = 0;
+	__u64 *ts, *randp;
+	__u32 rand;
 
-	ts = bpf_map_lookup_elem(&test_single_result, &i);
+	ts = bpf_map_lookup_elem(&test_single_result, &(__u32){0});
 	if (ts == NULL) {
 		return SKB_PASS;
 	}
-	return process_packet(skb, *ts);
+
+	randp = bpf_map_lookup_elem(&test_single_result, &(__u32){1});
+	if (randp == NULL) {
+		return SKB_PASS;
+	}
+
+	if (*randp > 0xffffffff) {
+		rand = bpf_get_prandom_u32();
+	} else {
+		rand = *randp;
+	}
+
+	return process_packet(skb, *ts, rand);
 }
 
 // test_fp_cmp takes the element with the index 0 out of the test_single_result map, and
@@ -302,13 +313,13 @@ int test_fp_cmp(struct __sk_buff *skb)
 		return SKB_REJECT;
 	}
 	// first check the value from userside
-	if (to_fixed_point(27) != *fp) {
+	if (to_fixed_point(27, 0) != *fp) {
 		char msg[] = "[E] fixed points are not equal\n";
 		bpf_trace_printk(msg, sizeof(msg));
 		return SKB_REJECT;
 	}
 	// then replace it
-	*fp = to_fixed_point(19);
+	*fp = to_fixed_point(19, 0);
 	bpf_map_update_elem(&test_single_result, &i, fp, 0);
 	return SKB_PASS;
 }

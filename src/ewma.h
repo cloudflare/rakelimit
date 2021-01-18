@@ -20,13 +20,13 @@ static fpoint FORCE_INLINE estimate_avg_rate(fpoint old_rate, __s64 dur)
 	}
 
 	// calculate pps since last timestamp
-	__u64 rate_current = to_fixed_point(ONE_SECOND_NS / dur);
+	fpoint rate_current = to_fixed_point(ONE_SECOND_NS / dur, 0);
 	// if the last timestamp is older than the window the new pps will simply be rate_current
 	if (dur >= WINDOW_NS) {
 		return rate_current;
 	}
 
-	fpoint a = to_fixed_point(dur) / WINDOW_NS;
+	fpoint a = to_fixed_point(dur, 0) / WINDOW_NS;
 
 	fpoint new_rate = old_rate;
 	if (old_rate > rate_current) {
