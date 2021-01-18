@@ -140,10 +140,10 @@ static FORCE_INLINE __u16 fill_port(struct __sk_buff *skb, enum address_specifie
 	}
 	if (addr == DEST) {
 		// assuming TCP or UDP, offsets 2-3 of L4 are dport
-		return load_half(skb, 2);
+		return load_half(skb, BPF_NET_OFF + sizeof(struct iphdr) + 2);
 	}
 
-	return load_half(skb, 0);
+	return load_half(skb, BPF_NET_OFF + sizeof(struct iphdr));
 }
 
 static FORCE_INLINE void generalise(struct packet_element *element, struct __sk_buff *skb, enum address_cidr sourceAddressPrefix, enum port_cidr generaliseSourcePort, enum address_cidr destinationAddressPrefix, enum port_cidr generaliseDestinationPort)
@@ -229,11 +229,11 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u64 ts, __u32 ra
 
 	/* level 3 */
 	/* *.*.*.*:* --> w.x.y.z:j */
-	generalise(&element, skb, ADDRESS_IP, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED);
+	generalise(&element, skb, ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED);
 	max_rate = estimate_max_rate(max_rate, ts, 8, &element);
 
 	/* *.*.*.*:i --> w.x.y.z:* */
-	generalise(&element, skb, ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD);
+	generalise(&element, skb, ADDRESS_WILDCARD, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD);
 	max_rate = estimate_max_rate(max_rate, ts, 9, &element);
 
 	/* A.B.C.*:* --> w.x.y.z:* */
@@ -340,7 +340,7 @@ int test_ewma(struct __sk_buff *skb)
 	if (dur == NULL) {
 		return SKB_REJECT;
 	}
-	*value = estimate_avg_rate(*value, *dur);
+	*value = estimate_avg_rate(*value, 0, *dur);
 	return SKB_PASS;
 }
 

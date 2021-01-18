@@ -218,6 +218,81 @@ func TestRate(t *testing.T) {
 	}
 }
 
+func TestGeneralisations(t *testing.T) {
+	const (
+		toNet = net.IPv4len - 1 // /24
+		limit = 100
+	)
+
+	src := net.IP{7, 6, 5, 4}
+	srcPort := 53
+	dst := net.IP{1, 2, 3, 4}
+	dstPort := 443
+	wildcard := net.IP{}
+
+	generalisations := []struct {
+		level uint32
+		element
+	}{
+		// level 0
+		{0, element{src, srcPort, dst, dstPort}},
+
+		// level 1
+		{1, element{src[:toNet], srcPort, dst, dstPort}},
+		{1, element{src, -1, dst, dstPort}},
+		{1, element{src, srcPort, dst, -1}},
+
+		// level 2
+		{2, element{wildcard, srcPort, dst, dstPort}},
+		{2, element{src[:toNet], -1, dst, dstPort}},
+		{2, element{src[:toNet], srcPort, dst, -1}},
+		{2, element{src, -1, dst, -1}},
+
+		// level 3
+		{3, element{wildcard, -1, dst, dstPort}},
+		{3, element{wildcard, srcPort, dst, -1}},
+		{3, element{src[:toNet], -1, dst, -1}},
+
+		// level 4
+		{4, element{wildcard, -1, dst, -1}},
+	}
+
+	for _, gen := range generalisations {
+		t.Run(gen.String(), func(t *testing.T) {
+			rake := mustNew(t, limit)
+
+			// Drop all packets once rate exceeds limit
+			rake.updateRand(t, math.MaxUint32)
+
+			packets := generatePackets(time.Second, packetSpec{
+				rate:    limit + 1,
+				element: gen.element,
+			})
+
+			for i, packet := range packets {
+				rake.updateTime(t, packet.received)
+
+				verdict, _, err := rake.program.Test(packet.element)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if i == 0 {
+					if verdict == 0 {
+						t.Fatal("First packet shouldn't be dropped")
+					}
+
+					continue
+				}
+
+				if verdict > 0 {
+					t.Fatalf("Accepted packet #%d", i)
+				}
+			}
+		})
+	}
+}
+
 func TestFullySpecifiedAttacker(t *testing.T) {
 	traffic := generatePackets(time.Minute,
 		packetSpec{
