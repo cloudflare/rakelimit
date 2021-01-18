@@ -24,7 +24,7 @@ func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 	// set ratelimit
 	collectionSpec := rakelimitSpec.CollectionSpec()
 	if err := collectionSpec.RewriteConstants(map[string]interface{}{
-		"limit": floatToFixed(float64(ppsLimit)),
+		"LIMIT": ppsLimit,
 	}); err != nil {
 		return nil, fmt.Errorf("Can't rewrite limit: %v", err)
 	}

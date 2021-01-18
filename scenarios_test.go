@@ -1,62 +1,47 @@
 package rakelimit
 
 import (
+	"bytes"
+	"flag"
 	"fmt"
-	"io/ioutil"
 	"net"
+	"os"
 	"testing"
 
-	"encoding/json"
 	"math"
 	"math/rand"
 	"sort"
 	"time"
 
-	"github.com/cilium/ebpf"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
 
 const rateLimit = 25.0
 
-func getBPFprogram(t *testing.T) (*ebpf.Program, *ebpf.Map) {
-	t.Helper()
-	rakelimitSpec, err := newRakeSpecs()
-	if err != nil {
-		t.Fatal("Can't get elf spec", err)
+var seed int64
+
+func TestMain(m *testing.M) {
+	flag.Int64Var(&seed, "seed", 0, "seed for the random number generator")
+	flag.Parse()
+
+	if seed == 0 {
+		seed = time.Now().UnixNano()
 	}
 
-	rakelimitSpec.CollectionSpec().RewriteConstants(map[string]interface{}{
-		"limit": floatToFixed(rateLimit),
-	})
-
-	programSpecs, err := rakelimitSpec.Load(nil)
-	if err != nil {
-		t.Fatal("Can't load program", err)
-	}
-
-	prog := programSpecs.ProgramTestAnchor
-	timeTable := programSpecs.MapTestSingleResult
-	t.Cleanup(func() { programSpecs.Close() })
-	return prog, timeTable
+	fmt.Println("Seed is", seed)
+	os.Exit(m.Run())
 }
 
-type packet struct {
-	element  net.IP
-	received time.Time
-	key      string
-	name     string
-}
-
-type Element struct {
+type element struct {
 	SourceAddress      net.IP
 	SourcePort         int
 	DestinationAddress net.IP
 	DestinationPort    int
 }
 
-func (el *Element) Clone() *Element {
-	newEl := Element{
+func (el *element) Clone() *element {
+	newEl := element{
 		SourcePort:         el.SourcePort,
 		DestinationPort:    el.DestinationPort,
 		SourceAddress:      make([]byte, len(el.SourceAddress)),
@@ -69,381 +54,370 @@ func (el *Element) Clone() *Element {
 	return &newEl
 }
 
-func (el *Element) String() string {
+func (el *element) String() string {
 	return fmt.Sprintf("%s:%d --> %s:%d", el.SourceAddress, el.SourcePort, el.DestinationAddress, el.DestinationPort)
 }
 
-func TestFullySpecifiedAttacker(t *testing.T) {
-	rand.Seed(42)
-	now := time.Now()
-	duration := time.Minute
-
-	traffic := make([]packet, 0)
-	traffic = append(traffic, generateTraffic("attacker", now, duration, 100, 0.0, 0, Element{
-		SourceAddress:      []byte{7, 6, 5, 4},
-		DestinationAddress: []byte{1, 2, 3, 4},
-		SourcePort:         53,
-		DestinationPort:    443,
-	})...)
-
-	// generate good traffic that generalises into attack traffic
-	traffic = append(traffic, generateTraffic("insideHH", now.Add(time.Millisecond*100), duration, 5, 0, 0, Element{
-		SourceAddress:      []byte{7, 6, 5, 1},
-		DestinationAddress: []byte{1, 2, 3, 4},
-		SourcePort:         53,
-		DestinationPort:    443,
-	})...)
-
-	// generate good traffic that doesn't generalise into the attack traffic
-	traffic = append(traffic, generateTraffic("outsideHH", now, duration, 5, 0, 0, Element{
-		SourceAddress:      []byte{1, 1, 1, 1},
-		DestinationAddress: []byte{6, 7, 8, 9},
-		SourcePort:         10,
-		DestinationPort:    11,
-	})...)
-
-	// and some random noise
-	traffic = append(traffic, generateTraffic("noise", now, duration, 100, 0, 0, Element{
-		SourceAddress:      []byte{8, 7},
-		DestinationAddress: []byte{6, 7},
-		SourcePort:         -1,
-		DestinationPort:    -1,
-	})...)
-
-	runScenario(t, "fully_specified_attacker.json", traffic, now, false, true)
+func (el *element) marshal() []byte {
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{}
+	gopacket.SerializeLayers(buf, opts,
+		&layers.Ethernet{
+			SrcMAC:       []byte{1, 2, 3, 4, 5, 6},
+			DstMAC:       []byte{6, 5, 4, 3, 2, 1},
+			EthernetType: layers.EthernetTypeIPv4,
+		},
+		&layers.IPv4{
+			SrcIP:    el.SourceAddress,
+			DstIP:    el.DestinationAddress,
+			Protocol: layers.IPProtocolUDP,
+		},
+		&layers.UDP{
+			SrcPort: layers.UDPPort(el.SourcePort),
+			DstPort: layers.UDPPort(el.DestinationPort),
+		},
+		gopacket.Payload([]byte{1, 2, 3, 4}),
+	)
+	return buf.Bytes()
 }
 
-func TestAttackerSubnet(t *testing.T) {
-	rand.Seed(42)
-	now := time.Now()
-	duration := time.Minute
-
-	traffic := make([]packet, 0)
-	traffic = append(traffic, generateTraffic("attacker", now, duration, 100, 0.0, 0.7, Element{
-		SourceAddress:      []byte{7, 6, 5},
-		DestinationAddress: []byte{1, 2, 3, 4},
-		SourcePort:         53,
-		DestinationPort:    443,
-	})...)
-
-	// generate good traffic that generalises into attack traffic
-	traffic = append(traffic, generateTraffic("insideHH", now, duration, 5, 0, 0, Element{
-		SourceAddress:      []byte{7, 6, 5, 1},
-		DestinationAddress: []byte{1, 2, 3, 4},
-		SourcePort:         53,
-		DestinationPort:    443,
-	})...)
-
-	// generate good traffic that doesn't generalise into the attack traffic
-	traffic = append(traffic, generateTraffic("outsideHH", now, duration, 5, 0, 0, Element{
-		SourceAddress:      []byte{1, 1, 1, 1},
-		DestinationAddress: []byte{6, 7, 8, 9},
-		SourcePort:         10,
-		DestinationPort:    11,
-	})...)
-
-	// and some random noise
-	traffic = append(traffic, generateTraffic("noise", now, duration, 100, 0, 0, Element{
-		SourceAddress:      []byte{8, 9},
-		DestinationAddress: []byte{},
-		SourcePort:         -1,
-		DestinationPort:    -1,
-	})...)
-
-	runScenario(t, "attacker_subnet.json", traffic, now, false, true)
+type packet struct {
+	element  []byte
+	received uint64
+	key      string
 }
 
-func TestAttackerSubnetRandomPort(t *testing.T) {
-	rand.Seed(42)
-	now := time.Now()
-	duration := time.Minute
-
-	traffic := make([]packet, 0)
-	traffic = append(traffic, generateTraffic("attacker", now, duration, 100, 0.0, 0.5, Element{
-		SourceAddress:      []byte{7, 6, 5},
-		DestinationAddress: []byte{1, 2, 3, 4},
-		SourcePort:         -1,
-		DestinationPort:    443,
-	})...)
-
-	// generate good traffic that generalises into attack traffic
-	traffic = append(traffic, generateTraffic("insideHH", now, duration, 5, 0, 0, Element{
-		SourceAddress:      []byte{7, 6, 5, 1},
-		DestinationAddress: []byte{1, 2, 3, 4},
-		SourcePort:         53,
-		DestinationPort:    443,
-	})...)
-
-	// generate good traffic that doesn't generalise into the attack traffic
-	traffic = append(traffic, generateTraffic("outsideHH", now, duration, 5, 0, 0, Element{
-		SourceAddress:      []byte{1, 1, 1, 1},
-		DestinationAddress: []byte{6, 7, 8, 9},
-		SourcePort:         10,
-		DestinationPort:    11,
-	})...)
-
-	// and some random noise
-	traffic = append(traffic, generateTraffic("noise", now, duration, 100, 0, 0, Element{
-		SourceAddress:      []byte{7, 6},
-		DestinationAddress: []byte{},
-		SourcePort:         -1,
-		DestinationPort:    -1,
-	})...)
-
-	runScenario(t, "attacker_subnet_random_port.json", traffic, now, false, true)
+type packetSpec struct {
+	key  string
+	rate int
+	element
 }
 
-func TestReflectionAttack(t *testing.T) {
-	rand.Seed(42)
-	now := time.Now()
-	duration := time.Minute
+func generatePackets(duration time.Duration, specs ...packetSpec) []packet {
+	// specs describe individual streams of packets that "arrive" concurrently.
+	// We need to emit packets from the specs in the correct order, determined
+	// by their rate.
+	type step struct {
+		now uint64
+		packetSpec
+	}
 
-	traffic := make([]packet, 0)
-	traffic = append(traffic, generateTraffic("attacker", now, duration, 100, 0.0, 0.5, Element{
-		SourceAddress:      []byte{},
-		DestinationAddress: []byte{1, 2, 3, 4},
-		SourcePort:         53,
-		DestinationPort:    443,
-	})...)
+	var steps []step
+	for _, spec := range specs {
+		interval := time.Second / time.Duration(spec.rate) / time.Nanosecond
+		for i := 0; i < int(duration/interval); i++ {
+			steps = append(steps, step{
+				uint64(i) * uint64(interval),
+				spec,
+			})
+		}
 
-	// generate good traffic that generalises into attack traffic
-	traffic = append(traffic, generateTraffic("insideHH", now, duration, 5, 0, 0, Element{
-		SourceAddress:      []byte{7, 6, 5, 1},
-		DestinationAddress: []byte{1, 2, 3, 4},
-		SourcePort:         53,
-		DestinationPort:    443,
-	})...)
+	}
 
-	// generate good traffic that doesn't generalise into the attack traffic
-	traffic = append(traffic, generateTraffic("outsideHH", now, duration, 5, 0, 0, Element{
-		SourceAddress:      []byte{1, 1, 1, 1},
-		DestinationAddress: []byte{6, 7, 8, 9},
-		SourcePort:         10,
-		DestinationPort:    11,
-	})...)
+	sort.Slice(steps, func(i, j int) bool {
+		return steps[i].now < steps[j].now
+	})
 
-	// and some random noise
-	traffic = append(traffic, generateTraffic("noise", now, duration, 100, 0, 0, Element{
-		SourceAddress:      []byte{},
-		DestinationAddress: []byte{6, 8},
-		SourcePort:         -1,
-		DestinationPort:    -1,
-	})...)
+	rng := rand.New(rand.NewSource(seed))
 
-	runScenario(t, "reflection_attack.json", traffic, now, false, true)
-}
-
-func TestDestinationOverload(t *testing.T) {
-	rand.Seed(42)
-	now := time.Now()
-	duration := time.Minute
-
-	traffic := make([]packet, 0)
-	traffic = append(traffic, generateTraffic("attacker", now, duration, 100, 0.0, 0.5, Element{
-		SourceAddress:      []byte{},
-		DestinationAddress: []byte{1, 2, 3, 4},
-		SourcePort:         -1,
-		DestinationPort:    443,
-	})...)
-
-	// generate good traffic that generalises into attack traffic
-	traffic = append(traffic, generateTraffic("insideHH", now, duration, 5, 0, 0.5, Element{
-		SourceAddress:      []byte{7, 6, 5, 1},
-		DestinationAddress: []byte{1, 2, 3, 4},
-		SourcePort:         53,
-		DestinationPort:    443,
-	})...)
-
-	// generate good traffic that doesn't generalise into the attack traffic
-	traffic = append(traffic, generateTraffic("outsideHH", now, duration, 5, 0, 0, Element{
-		SourceAddress:      []byte{1, 1, 1, 1},
-		DestinationAddress: []byte{6, 7, 8, 9},
-		SourcePort:         10,
-		DestinationPort:    11,
-	})...)
-
-	// and some random noise
-	traffic = append(traffic, generateTraffic("noise", now, duration, 100, 0, 0, Element{
-		SourceAddress:      []byte{7, 6},
-		DestinationAddress: []byte{},
-		SourcePort:         -1,
-		DestinationPort:    -1,
-	})...)
-
-	runScenario(t, "destination_overload.json", traffic, now, false, true)
-}
-
-func generateTraffic(key string, now time.Time, duration time.Duration, pps int, sinFactor float64, increaseFactor float64, element Element) []packet {
 	var packets []packet
-
-	start := now
-	target := now.Add(duration)
-
-	for now.Before(target) {
-		el := element.Clone() //works
-		// var el Element // doesn't work
-
-		source := make([]byte, 4)
-		dest := make([]byte, 4)
-
-		// fill up to the right with random bytes
-		rand.Read(source[len(el.SourceAddress):])
-		rand.Read(dest[len(el.DestinationAddress):])
-
-		// copy over pre-determined part
-		copy(source, el.SourceAddress)
-		copy(dest, el.DestinationAddress)
-
-		el.SourceAddress = source
-		el.DestinationAddress = dest
-
-		// ports
-		if el.SourcePort == -1 {
-			el.SourcePort = int(rand.Intn(int(math.Pow(2, 16))))
-		}
-		if el.DestinationPort == -1 {
-			el.DestinationPort = int(rand.Intn(int(math.Pow(2, 16))))
+	var prev element
+	for _, step := range steps {
+		source := step.SourceAddress
+		if len(source) < net.IPv4len {
+			source = randomIP(rng, prev.SourceAddress, source)
 		}
 
-		buf := gopacket.NewSerializeBuffer()
+		sourcePort := step.SourcePort
+		if sourcePort == -1 {
+			sourcePort = randomPort(rng, prev.SourcePort)
+		}
 
-		opts := gopacket.SerializeOptions{}
-		gopacket.SerializeLayers(buf, opts,
-			&layers.Ethernet{
-				SrcMAC:       []byte{1, 2, 3, 4, 5, 6},
-				DstMAC:       []byte{6, 5, 4, 3, 2, 1},
-				EthernetType: layers.EthernetTypeIPv4,
-			},
-			&layers.IPv4{
-				SrcIP:    el.SourceAddress,
-				DstIP:    el.DestinationAddress,
-				Protocol: layers.IPProtocolUDP,
-			},
-			&layers.UDP{
-				SrcPort: layers.UDPPort(el.SourcePort),
-				DstPort: layers.UDPPort(el.DestinationPort),
-			},
-			gopacket.Payload([]byte{1, 2, 3, 4}))
+		dest := step.DestinationAddress
+		if len(dest) < net.IPv4len {
+			dest = randomIP(rng, prev.DestinationAddress, dest)
+		}
+
+		destPort := step.DestinationPort
+		if destPort == -1 {
+			destPort = randomPort(rng, prev.DestinationPort)
+		}
+
+		next := element{
+			source, sourcePort,
+			dest, destPort,
+		}
 
 		packets = append(packets, packet{
-			element:  buf.Bytes(),
-			received: now,
-			key:      key,
-			name:     el.String(),
+			received: step.now,
+			key:      step.key,
+			element:  next.marshal(),
 		})
 
-		// initial sleep
-		sleep := float64(time.Second.Nanoseconds()) / float64(pps)
-		// adjust to sleep factor
-		sleep = sleep * (1 - float64(now.Sub(start))/float64(target.Sub(start))*increaseFactor)
-		// some noise
-		dur := time.Duration((0.9 + rand.Float64()/5) * sleep)
-		// add a sinus to have some further periodic fluctuations
-		divisor := float64(target.Sub(start)) / (math.Pi * 2)
-		// calculate sinResult
-		sinResult := math.Sin(float64(now.Sub(start))/divisor) * sinFactor
-		dur = time.Duration(float64(dur) * (1 + sinResult))
-		now = now.Add(dur)
+		prev = next
 	}
+
 	return packets
 }
 
-type ByTime []packet
-
-func (bt ByTime) Len() int {
-	return len(bt)
+func randomPort(rng *rand.Rand, prevPort int) int {
+	port := int(rng.Intn(math.MaxUint16))
+	for port == prevPort {
+		port = int(rng.Intn(math.MaxUint16))
+	}
+	return port
 }
 
-func (bt ByTime) Swap(i, j int) {
-	bt[i], bt[j] = bt[j], bt[i]
-}
+func randomIP(rng *rand.Rand, prevIP net.IP, template net.IP) net.IP {
+	ip := make(net.IP, net.IPv4len)
+	copy(ip, template)
 
-func (bt ByTime) Less(i, j int) bool {
-	return bt[i].received.Before(bt[j].received)
-}
-
-//TODO: use option struct
-func runScenario(t *testing.T, filename string, traffic []packet, start time.Time, addFirst, broken bool) {
-
-	// sort by time
-	sort.Sort(ByTime(traffic))
-
-	type PerTime struct {
-		total  int
-		actual int
+	rand.Read(ip[len(template):])
+	for bytes.Equal([]byte(prevIP), []byte(ip)) {
+		rand.Read(ip[len(template):])
 	}
 
-	type SingleKey map[string]PerTime
+	return ip
+}
 
-	RatesPerKeyPerTime := make(map[int64]SingleKey)
+func TestFullySpecifiedAttacker(t *testing.T) {
+	traffic := generatePackets(time.Minute,
+		packetSpec{
+			"attacker", 100, element{
+				SourceAddress:      []byte{7, 6, 5, 4},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         53,
+				DestinationPort:    443,
+			},
+		},
+		packetSpec{
+			"insideHH", 5, element{
+				SourceAddress:      []byte{7, 6, 5, 1},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         53,
+				DestinationPort:    443,
+			},
+		},
+		packetSpec{
+			"outsideHH", 5, element{
+				SourceAddress:      []byte{1, 1, 1, 1},
+				DestinationAddress: []byte{6, 7, 8, 9},
+				SourcePort:         10,
+				DestinationPort:    11,
+			},
+		},
+		packetSpec{
+			"noise", 100, element{
+				SourceAddress:      []byte{8, 7},
+				DestinationAddress: []byte{6, 7},
+				SourcePort:         -1,
+				DestinationPort:    -1,
+			},
+		},
+	)
 
-	var attackerMinTime, attackerMaxTime time.Time
+	runScenario(t, rateLimit, traffic)
+}
 
-	attackPacketsPassed := 0
-	prog, timeMap := getBPFprogram(t)
+func TestAttackerSubnet(t *testing.T) {
+	traffic := generatePackets(time.Minute,
+		packetSpec{
+			"attacker", 100, element{
+				SourceAddress:      []byte{7, 6, 5},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         53,
+				DestinationPort:    443,
+			},
+		},
+		packetSpec{
+			"insideHH", 5, element{
+				SourceAddress:      []byte{7, 6, 5, 1},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         53,
+				DestinationPort:    443,
+			},
+		},
+		packetSpec{
+			"outsideHH", 5, element{
+				SourceAddress:      []byte{1, 1, 1, 1},
+				DestinationAddress: []byte{6, 7, 8, 9},
+				SourcePort:         10,
+				DestinationPort:    11,
+			},
+		},
+		packetSpec{
+			"noise", 100, element{
+				SourceAddress:      []byte{8, 9},
+				DestinationAddress: []byte{},
+				SourcePort:         -1,
+				DestinationPort:    -1,
+			},
+		},
+	)
 
-	// group per time and key
+	runScenario(t, rateLimit, traffic)
+}
+
+func TestAttackerSubnetRandomPort(t *testing.T) {
+	traffic := generatePackets(time.Minute,
+		packetSpec{
+			"attacker", 100, element{
+				SourceAddress:      []byte{7, 6, 5},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         -1,
+				DestinationPort:    443,
+			},
+		},
+		packetSpec{
+			"insideHH", 5, element{
+				SourceAddress:      []byte{7, 6, 5, 1},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         53,
+				DestinationPort:    443,
+			},
+		},
+		packetSpec{
+			"outsideHH", 5, element{
+				SourceAddress:      []byte{1, 1, 1, 1},
+				DestinationAddress: []byte{6, 7, 8, 9},
+				SourcePort:         10,
+				DestinationPort:    11,
+			},
+		},
+		packetSpec{
+			"noise", 100, element{
+				SourceAddress:      []byte{7, 6},
+				DestinationAddress: []byte{},
+				SourcePort:         -1,
+				DestinationPort:    -1,
+			},
+		},
+	)
+
+	runScenario(t, rateLimit, traffic)
+}
+
+func TestReflectionAttack(t *testing.T) {
+	traffic := generatePackets(time.Minute,
+		packetSpec{
+			"attacker", 100, element{
+				SourceAddress:      []byte{},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         53,
+				DestinationPort:    443,
+			},
+		},
+		packetSpec{
+			"insideHH", 5, element{
+				SourceAddress:      []byte{7, 6, 5, 1},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         53,
+				DestinationPort:    443,
+			},
+		},
+		packetSpec{
+			"outsideHH", 5, element{
+				SourceAddress:      []byte{1, 1, 1, 1},
+				DestinationAddress: []byte{6, 7, 8, 9},
+				SourcePort:         10,
+				DestinationPort:    11,
+			},
+		},
+		packetSpec{
+			"noise", 100, element{
+				SourceAddress:      []byte{},
+				DestinationAddress: []byte{6, 8},
+				SourcePort:         -1,
+				DestinationPort:    -1,
+			},
+		},
+	)
+
+	runScenario(t, rateLimit, traffic)
+}
+
+func TestDestinationOverload(t *testing.T) {
+	traffic := generatePackets(time.Minute,
+		packetSpec{
+			"attacker", 100, element{
+				SourceAddress:      []byte{},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         -1,
+				DestinationPort:    443,
+			},
+		},
+		packetSpec{
+			"insideHH", 5, element{
+				SourceAddress:      []byte{7, 6, 5, 1},
+				DestinationAddress: []byte{1, 2, 3, 4},
+				SourcePort:         53,
+				DestinationPort:    443,
+			},
+		},
+		packetSpec{
+			"outsideHH", 5, element{
+				SourceAddress:      []byte{1, 1, 1, 1},
+				DestinationAddress: []byte{6, 7, 8, 9},
+				SourcePort:         10,
+				DestinationPort:    11,
+			},
+		},
+		packetSpec{
+			"noise", 100, element{
+				SourceAddress:      []byte{7, 6},
+				DestinationAddress: []byte{},
+				SourcePort:         -1,
+				DestinationPort:    -1,
+			},
+		},
+	)
+
+	runScenario(t, rateLimit, traffic)
+}
+
+func runScenario(t *testing.T, rateLimit uint32, traffic []packet) {
+	type perKeyStats struct {
+		total       int
+		actual      int
+		first, last uint64
+	}
+
+	rates := make(map[string]*perKeyStats)
+	rake := mustNew(t, rateLimit)
+
 	for _, packet := range traffic {
-
-		if packet.key == "attacker" {
-			if attackerMinTime.IsZero() || packet.received.Before(attackerMinTime) {
-				attackerMinTime = packet.received
-			}
-			if packet.received.After(attackerMaxTime) {
-				attackerMaxTime = packet.received
-			}
+		stats := rates[packet.key]
+		if stats == nil {
+			stats = new(perKeyStats)
+			rates[packet.key] = stats
 		}
 
-		// make sure key's are available first
-		if _, ok := RatesPerKeyPerTime[packet.received.Unix()]; !ok {
-			RatesPerKeyPerTime[packet.received.Unix()] = make(SingleKey)
+		if stats.first == 0 || packet.received < stats.first {
+			stats.first = packet.received
+		}
+		if packet.received > stats.last {
+			stats.last = packet.received
 		}
 
-		el := RatesPerKeyPerTime[packet.received.Unix()][packet.key]
-		timeMap.Put(uint32(0), packet.received.UnixNano())
-		verdict, _, err := prog.Test(packet.element)
+		rake.updateTime(t, packet.received)
+		verdict, _, err := rake.program.Test(packet.element)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if verdict != 0 {
-			//pass
-			el.actual++
-			if packet.key == "attacker" {
-				attackPacketsPassed++
-			}
+
+		if verdict > 0 {
+			stats.actual++
 		}
-		el.total++
-		RatesPerKeyPerTime[packet.received.Unix()][packet.key] = el
+		stats.total++
 	}
 
-	attackerPps := float64(attackPacketsPassed) / attackerMaxTime.Sub(attackerMinTime).Seconds()
+	limit := float64(rateLimit)
+	stats := rates["attacker"]
 
-	// check if rate limit within expected margin
-	if attackerPps > rateLimit*1.10 || attackerPps < rateLimit*0.9 {
-		t.Fatal("Attacker traffic outside of range", attackerPps)
+	duration := time.Duration(stats.last-stats.first) * time.Nanosecond
+	actualPPS := float64(stats.actual) / duration.Seconds()
+
+	if actualPPS > limit*1.10 || actualPPS < limit*0.9 {
+		t.Errorf("Rate for attacker with limit %.0f is %f", limit, actualPPS)
 	}
-
-	// generate a JSON for debugging/plotting
-	var jsonRecords []map[string]uint64
-
-	timestampKey := "unix_timestamp_s"
-	for ts, traffics := range RatesPerKeyPerTime {
-		record := make(map[string]uint64)
-		record[timestampKey] = uint64(ts)
-		for k, counts := range traffics {
-			record[k+"_actual"] = uint64(counts.actual)
-			record[k+"_total"] = uint64(counts.total)
-		}
-		jsonRecords = append(jsonRecords, record)
-	}
-
-	sort.Slice(jsonRecords, func(i, j int) bool {
-		return jsonRecords[i][timestampKey] < jsonRecords[j][timestampKey]
-	})
-
-	bytes, err := json.Marshal(jsonRecords)
-	if err != nil {
-		t.Fatal("Can't marshal record:", err)
-	}
-	ioutil.WriteFile(filename, bytes, 0666)
 }
