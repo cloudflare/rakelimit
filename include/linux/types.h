@@ -16,7 +16,7 @@ _Static_assert(sizeof(__u64) == 8, "__u64 must be 8 bytes");
 
 typedef __u16 __be16;
 typedef __u16 __le16;
-typedef __u16 __be32;
+typedef __u32 __be32;
 typedef __u32 __le32;
 typedef __u64 __be64;
 typedef __u64 __le64;
