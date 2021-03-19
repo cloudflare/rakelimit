@@ -20,21 +20,20 @@ type Rakelimit struct {
 
 // New creates a new Rakelimit instance based on the specified ppsLimit
 func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
-	rakelimitSpec, err := newRakeSpecs()
+	// set ratelimit
+	spec, err := loadRake()
 	if err != nil {
 		return nil, fmt.Errorf("Can't get elf spec: %v", err)
 	}
 
-	// set ratelimit
-	collectionSpec := rakelimitSpec.CollectionSpec()
-	if err := collectionSpec.RewriteConstants(map[string]interface{}{
+	if err := spec.RewriteConstants(map[string]interface{}{
 		"LIMIT": ppsLimit,
 	}); err != nil {
 		return nil, fmt.Errorf("Can't rewrite limit: %v", err)
 	}
 
-	objs, err := rakelimitSpec.Load(nil)
-	if err != nil {
+	var objs rakeObjects
+	if err := spec.LoadAndAssign(&objs, nil); err != nil {
 		return nil, fmt.Errorf("load BPF: %v", err)
 	}
 
@@ -55,9 +54,9 @@ func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 
 		switch domain {
 		case unix.AF_INET:
-			prog = objs.ProgramFilterIpv4
+			prog = objs.FilterIpv4
 		case unix.AF_INET6:
-			prog = objs.ProgramFilterIpv6
+			prog = objs.FilterIpv6
 		default:
 			opErr = fmt.Errorf("unsupported socket domain: %d", domain)
 			return
@@ -78,7 +77,7 @@ func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 		return nil, opErr
 	}
 
-	return &Rakelimit{domain, prog, objs}, nil
+	return &Rakelimit{domain, prog, &objs}, nil
 }
 
 // Close cleans up resources occupied and should be called when finished using the structure

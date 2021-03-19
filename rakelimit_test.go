@@ -21,20 +21,15 @@ type FixedPointTuple struct {
 /* TestBPFFloatToFixedPoint tests the convesion of integers/floats to fixed-point on the
 userspace & the bpf side to ensure both convert it in the same way */
 func TestBPFFloatToFixedPoint(t *testing.T) {
-	rakeLimitSpec, err := newRakeSpecs()
-	if err != nil {
-		t.Fatal("Can't get elf spec", err)
-	}
-
-	programSpecs, err := rakeLimitSpec.Load(nil)
-	if err != nil {
+	var objs rakeObjects
+	if err := loadRakeObjects(&objs, nil); err != nil {
 		t.Fatal("Can't load program", err)
+
 	}
-	defer programSpecs.Close()
+	defer objs.Close()
 
-	prog := programSpecs.ProgramTestFpCmp
-
-	lookupTable := programSpecs.MapTestSingleResult
+	prog := objs.TestFpCmp
+	lookupTable := objs.TestSingleResult
 	payload := make([]byte, 14)
 
 	// check 27
@@ -69,19 +64,15 @@ func TestBPFFEwma(t *testing.T) {
 		newTSKey
 	)
 
-	rakeLimitSpec, err := newRakeSpecs()
-	if err != nil {
-		t.Fatal("Can't get elf spec", err)
-	}
-
-	programSpecs, err := rakeLimitSpec.Load(nil)
-	if err != nil {
+	var objs rakeObjects
+	if err := loadRakeObjects(&objs, nil); err != nil {
 		t.Fatal("Can't load program", err)
-	}
-	defer programSpecs.Close()
 
-	prog := programSpecs.ProgramTestEwma
-	sr := programSpecs.MapTestSingleResult
+	}
+	defer objs.Close()
+
+	prog := objs.TestEwma
+	sr := objs.TestSingleResult
 
 	sr.Put(rateKey, uint64(50))
 	sr.Put(oldTSKey, uint64(346534651))
@@ -221,12 +212,12 @@ func mustNew(tb testing.TB, addr string, limit uint32) *testRakelimit {
 	}
 	tb.Cleanup(func() { rake.Close() })
 
-	prog := rake.bpfObjects.ProgramTestIpv4
+	prog := rake.bpfObjects.TestIpv4
 	if rake.domain == unix.AF_INET6 {
-		prog = rake.bpfObjects.ProgramTestIpv6
+		prog = rake.bpfObjects.TestIpv6
 	}
 
-	args := rake.bpfObjects.MapTestSingleResult
+	args := rake.bpfObjects.TestSingleResult
 	if err := args.Put(randArgKey, uint64(math.MaxUint32+1)); err != nil {
 		tb.Fatal("Can't update rand:", err)
 	}

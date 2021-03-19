@@ -11,102 +11,121 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type rakeSpecs struct {
-	ProgramFilterIpv4   *ebpf.ProgramSpec `ebpf:"filter_ipv4"`
-	ProgramFilterIpv6   *ebpf.ProgramSpec `ebpf:"filter_ipv6"`
-	ProgramTestEwma     *ebpf.ProgramSpec `ebpf:"test_ewma"`
-	ProgramTestFpCmp    *ebpf.ProgramSpec `ebpf:"test_fp_cmp"`
-	ProgramTestIpv4     *ebpf.ProgramSpec `ebpf:"test_ipv4"`
-	ProgramTestIpv6     *ebpf.ProgramSpec `ebpf:"test_ipv6"`
-	MapCountmin         *ebpf.MapSpec     `ebpf:"countmin"`
-	MapStats            *ebpf.MapSpec     `ebpf:"stats"`
-	MapTestSingleResult *ebpf.MapSpec     `ebpf:"test_single_result"`
-	SectionRodata       *ebpf.MapSpec     `ebpf:".rodata"`
-}
-
-func newRakeSpecs() (*rakeSpecs, error) {
+// loadRake returns the embedded CollectionSpec for rake.
+func loadRake() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_RakeBytes)
 	spec, err := ebpf.LoadCollectionSpecFromReader(reader)
 	if err != nil {
 		return nil, fmt.Errorf("can't load rake: %w", err)
 	}
 
-	specs := new(rakeSpecs)
-	if err := spec.Assign(specs); err != nil {
-		return nil, fmt.Errorf("can't assign rake: %w", err)
-	}
-
-	return specs, nil
+	return spec, err
 }
 
-func (s *rakeSpecs) CollectionSpec() *ebpf.CollectionSpec {
-	return &ebpf.CollectionSpec{
-		Programs: map[string]*ebpf.ProgramSpec{
-			"filter_ipv4": s.ProgramFilterIpv4,
-			"filter_ipv6": s.ProgramFilterIpv6,
-			"test_ewma":   s.ProgramTestEwma,
-			"test_fp_cmp": s.ProgramTestFpCmp,
-			"test_ipv4":   s.ProgramTestIpv4,
-			"test_ipv6":   s.ProgramTestIpv6,
-		},
-		Maps: map[string]*ebpf.MapSpec{
-			"countmin":           s.MapCountmin,
-			"stats":              s.MapStats,
-			"test_single_result": s.MapTestSingleResult,
-			".rodata":            s.SectionRodata,
-		},
+// loadRakeObjects loads rake and converts it into a struct.
+//
+// The following types are suitable as obj argument:
+//
+//     *rakeObjects
+//     *rakePrograms
+//     *rakeMaps
+//
+// See ebpf.CollectionSpec.LoadAndAssign documentation for details.
+func loadRakeObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+	spec, err := loadRake()
+	if err != nil {
+		return err
 	}
+
+	return spec.LoadAndAssign(obj, opts)
 }
 
-func (s *rakeSpecs) Load(opts *ebpf.CollectionOptions) (*rakeObjects, error) {
-	var objs rakeObjects
-	if err := s.CollectionSpec().LoadAndAssign(&objs, opts); err != nil {
-		return nil, err
-	}
-	return &objs, nil
+// rakeSpecs contains maps and programs before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type rakeSpecs struct {
+	rakeProgramSpecs
+	rakeMapSpecs
 }
 
-func (s *rakeSpecs) Copy() *rakeSpecs {
-	return &rakeSpecs{
-		ProgramFilterIpv4:   s.ProgramFilterIpv4.Copy(),
-		ProgramFilterIpv6:   s.ProgramFilterIpv6.Copy(),
-		ProgramTestEwma:     s.ProgramTestEwma.Copy(),
-		ProgramTestFpCmp:    s.ProgramTestFpCmp.Copy(),
-		ProgramTestIpv4:     s.ProgramTestIpv4.Copy(),
-		ProgramTestIpv6:     s.ProgramTestIpv6.Copy(),
-		MapCountmin:         s.MapCountmin.Copy(),
-		MapStats:            s.MapStats.Copy(),
-		MapTestSingleResult: s.MapTestSingleResult.Copy(),
-		SectionRodata:       s.SectionRodata.Copy(),
-	}
+// rakeSpecs contains programs before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type rakeProgramSpecs struct {
+	FilterIpv4 *ebpf.ProgramSpec `ebpf:"filter_ipv4"`
+	FilterIpv6 *ebpf.ProgramSpec `ebpf:"filter_ipv6"`
+	TestEwma   *ebpf.ProgramSpec `ebpf:"test_ewma"`
+	TestFpCmp  *ebpf.ProgramSpec `ebpf:"test_fp_cmp"`
+	TestIpv4   *ebpf.ProgramSpec `ebpf:"test_ipv4"`
+	TestIpv6   *ebpf.ProgramSpec `ebpf:"test_ipv6"`
 }
 
+// rakeMapSpecs contains maps before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type rakeMapSpecs struct {
+	Countmin         *ebpf.MapSpec `ebpf:"countmin"`
+	Stats            *ebpf.MapSpec `ebpf:"stats"`
+	TestSingleResult *ebpf.MapSpec `ebpf:"test_single_result"`
+}
+
+// rakeObjects contains all objects after they have been loaded into the kernel.
+//
+// It can be passed to loadRakeObjects or ebpf.CollectionSpec.LoadAndAssign.
 type rakeObjects struct {
-	ProgramFilterIpv4   *ebpf.Program `ebpf:"filter_ipv4"`
-	ProgramFilterIpv6   *ebpf.Program `ebpf:"filter_ipv6"`
-	ProgramTestEwma     *ebpf.Program `ebpf:"test_ewma"`
-	ProgramTestFpCmp    *ebpf.Program `ebpf:"test_fp_cmp"`
-	ProgramTestIpv4     *ebpf.Program `ebpf:"test_ipv4"`
-	ProgramTestIpv6     *ebpf.Program `ebpf:"test_ipv6"`
-	MapCountmin         *ebpf.Map     `ebpf:"countmin"`
-	MapStats            *ebpf.Map     `ebpf:"stats"`
-	MapTestSingleResult *ebpf.Map     `ebpf:"test_single_result"`
-	SectionRodata       *ebpf.Map     `ebpf:".rodata"`
+	rakePrograms
+	rakeMaps
 }
 
 func (o *rakeObjects) Close() error {
-	for _, closer := range []io.Closer{
-		o.ProgramFilterIpv4,
-		o.ProgramFilterIpv6,
-		o.ProgramTestEwma,
-		o.ProgramTestFpCmp,
-		o.ProgramTestIpv4,
-		o.ProgramTestIpv6,
-		o.MapCountmin,
-		o.MapStats,
-		o.MapTestSingleResult,
-		o.SectionRodata,
-	} {
+	return _RakeClose(
+		&o.rakePrograms,
+		&o.rakeMaps,
+	)
+}
+
+// rakeMaps contains all maps after they have been loaded into the kernel.
+//
+// It can be passed to loadRakeObjects or ebpf.CollectionSpec.LoadAndAssign.
+type rakeMaps struct {
+	Countmin         *ebpf.Map `ebpf:"countmin"`
+	Stats            *ebpf.Map `ebpf:"stats"`
+	TestSingleResult *ebpf.Map `ebpf:"test_single_result"`
+}
+
+func (m *rakeMaps) Close() error {
+	return _RakeClose(
+		m.Countmin,
+		m.Stats,
+		m.TestSingleResult,
+	)
+}
+
+// rakePrograms contains all programs after they have been loaded into the kernel.
+//
+// It can be passed to loadRakeObjects or ebpf.CollectionSpec.LoadAndAssign.
+type rakePrograms struct {
+	FilterIpv4 *ebpf.Program `ebpf:"filter_ipv4"`
+	FilterIpv6 *ebpf.Program `ebpf:"filter_ipv6"`
+	TestEwma   *ebpf.Program `ebpf:"test_ewma"`
+	TestFpCmp  *ebpf.Program `ebpf:"test_fp_cmp"`
+	TestIpv4   *ebpf.Program `ebpf:"test_ipv4"`
+	TestIpv6   *ebpf.Program `ebpf:"test_ipv6"`
+}
+
+func (p *rakePrograms) Close() error {
+	return _RakeClose(
+		p.FilterIpv4,
+		p.FilterIpv6,
+		p.TestEwma,
+		p.TestFpCmp,
+		p.TestIpv4,
+		p.TestIpv6,
+	)
+}
+
+func _RakeClose(closers ...io.Closer) error {
+	for _, closer := range closers {
 		if err := closer.Close(); err != nil {
 			return err
 		}
