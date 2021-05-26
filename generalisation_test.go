@@ -17,8 +17,6 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
-const rateLimit = 25.0
-
 var seed int64
 
 func TestMain(m *testing.M) {

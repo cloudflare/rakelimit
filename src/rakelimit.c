@@ -12,7 +12,13 @@
 #include "countmin.h"
 #include "fasthash.h"
 
-static volatile const __u32 LIMIT;
+#define PARAMETER(type, name) \
+	({ \
+		type __tmp; \
+		_Static_assert(sizeof(__tmp) <= sizeof(__u64), name " exceeds 64 bits"); \
+		asm("%0 = " name " ll" : "=r"(__tmp)); \
+		__tmp; \
+	})
 
 enum address_gen {
 	ADDRESS_IP       = 0, // /32 or /128
@@ -31,6 +37,7 @@ enum port_gen {
 };
 
 struct gen {
+	int level;
 	enum address_gen source;
 	enum port_gen source_port;
 	enum address_gen dest;
@@ -40,33 +47,33 @@ struct gen {
 
 static const struct gen generalisations[] = {
 	/*level 0*/
-	{ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED, true},
+	{0, ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED, true},
 
 	/* level 1 */
-	{ADDRESS_NET, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED, false},
-	{ADDRESS_IP, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED, false},
-	{ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD, true},
+	{1, ADDRESS_NET, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED, false},
+	{1, ADDRESS_IP, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED, false},
+	{1, ADDRESS_IP, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD, true},
 
 	/* level 2 */
 	/* *.*.*.*:i --> w.x.y.z:j */
-	{ADDRESS_WILDCARD, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED, false},
+	{2, ADDRESS_WILDCARD, PORT_SPECIFIED, ADDRESS_IP, PORT_SPECIFIED, false},
 	/* a.b.c.*:* --> w.x.y.z:j */
-	{ADDRESS_NET, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED, false},
+	{2, ADDRESS_NET, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED, false},
 	/* a.b.c.*:i --> w.x.y.z:* */
-	{ADDRESS_NET, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD, false},
+	{2, ADDRESS_NET, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD, false},
 	/* a.b.c.d:* --> w.x.y.z:* */
-	{ADDRESS_IP, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD, true},
+	{2, ADDRESS_IP, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD, true},
 
 	/* level 3 */
 	/* *.*.*.*:* --> w.x.y.z:j */
-	{ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED, false},
+	{3, ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_SPECIFIED, false},
 	/* *.*.*.*:i --> w.x.y.z:* */
-	{ADDRESS_WILDCARD, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD, false},
+	{3, ADDRESS_WILDCARD, PORT_SPECIFIED, ADDRESS_IP, PORT_WILDCARD, false},
 	/* A.B.C.*:* --> w.x.y.z:* */
-	{ADDRESS_NET, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD, true},
+	{3, ADDRESS_NET, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD, true},
 
 	/* level 4 */
-	{ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD, true},
+	{4, ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD, true},
 };
 
 struct packet {
@@ -201,8 +208,9 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64
 {
 	struct packet pkt = {0};
 	__u32 max_rate    = 0;
+	__u32 limit       = PARAMETER(__u32, "LIMIT");
 
-	if (LIMIT == 0) {
+	if (limit == 0) {
 		return SKB_PASS;
 	}
 
@@ -223,7 +231,12 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64
 #pragma clang loop unroll(full)
 	for (int i = 0; i < ARRAY_SIZE(generalisations); i++) {
 		const struct gen *gen = &generalisations[i];
+		const int level       = gen->level;
 		__u32 rate;
+
+		// Force clang to inline level on the stack rather than loading it from
+		// .rodata later on.
+		asm volatile("" : : "r"(level) : "memory");
 
 		pkt.source_port      = (gen->source_port == PORT_WILDCARD) ? 0 : load_half(skb, troff);
 		pkt.destination_port = (gen->dest_port == PORT_WILDCARD) ? 0 : load_half(skb, troff + 2);
@@ -247,11 +260,11 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64
 		}
 
 		if (gen->evaluate) {
-			if (max_rate > LIMIT) {
+			if (max_rate > limit) {
 				if (rate_exceeded_level != NULL) {
-					*rate_exceeded_level = gen_level(gen);
+					*rate_exceeded_level = level;
 				}
-				return drop_or_accept(gen_level(gen), LIMIT, max_rate, rand);
+				return drop_or_accept(level, limit, max_rate, rand);
 			}
 
 			max_rate = 0;
