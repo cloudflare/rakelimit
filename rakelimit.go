@@ -3,9 +3,11 @@ package rakelimit
 import (
 	"errors"
 	"fmt"
+	"math"
 	"syscall"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"golang.org/x/sys/unix"
 )
 
@@ -23,13 +25,11 @@ func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 	// set ratelimit
 	spec, err := loadRake()
 	if err != nil {
-		return nil, fmt.Errorf("Can't get elf spec: %v", err)
+		return nil, fmt.Errorf("get elf spec: %v", err)
 	}
 
-	if err := spec.RewriteConstants(map[string]interface{}{
-		"LIMIT": ppsLimit,
-	}); err != nil {
-		return nil, fmt.Errorf("Can't rewrite limit: %v", err)
+	if err := rewriteConstant(spec, "LIMIT", uint64(ppsLimit)); err != nil {
+		return nil, err
 	}
 
 	var objs rakeObjects
@@ -83,4 +83,34 @@ func New(conn syscall.Conn, ppsLimit uint32) (*Rakelimit, error) {
 // Close cleans up resources occupied and should be called when finished using the structure
 func (rl *Rakelimit) Close() error {
 	return rl.bpfObjects.Close()
+}
+
+func rewriteConstant(spec *ebpf.CollectionSpec, symbol string, value uint64) error {
+	if value == math.MaxUint32 {
+		// Not useable due to a bug in cilium/ebpf.
+		return fmt.Errorf("value exceeds maximum")
+	}
+
+	rewritten := false
+	for name, prog := range spec.Programs {
+		for i := range prog.Instructions {
+			ins := &prog.Instructions[i]
+			if ins.Reference != symbol {
+				continue
+			}
+
+			if !ins.IsConstantLoad(asm.DWord) {
+				return fmt.Errorf("program %s: instruction %d: not a dword-sized constant load: %s", name, i, ins)
+			}
+
+			ins.Constant = int64(value)
+			rewritten = true
+		}
+	}
+
+	if !rewritten {
+		return fmt.Errorf("symbol %s is not referenced", symbol)
+	}
+
+	return nil
 }
