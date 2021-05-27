@@ -6,12 +6,6 @@ a certain rate of packets. For more information please take a look at our [blog 
 
 ## Usage
 
-First we need to increase the optmem memory
-
-```
-sudo sysctl -w net.core.optmem_max=65536
-```
-
 To activate rakelimit create a new instance and provide a file descriptor and a rate limit that you think the
 service in question won't be able to handle anymore:
 
@@ -34,11 +28,23 @@ That's all! The library now enforces rate limits on incoming packets, and it hap
 
 ## Requirements
 
-The library should be go-gettable, and has been tested on Linux 5.4.
+The library should be go-gettable, and has been tested on Linux 5.11.
 
-You will need a `clang-9` binary if you want to recompile the filter. Simply run `go generate` in the root of the project.
+You may have to increase optmem_max depending on your distribution:
+
+```
+sudo sysctl -w net.core.optmem_max=22528
+```
+
+You will need a `clang-12` binary if you want to recompile the filter. Simply run `go generate` in the root of the project.
 
 ## Limitations
-- no IPv6 (we're working on adding it)
+- IPv6 doesn't support options
 - requires tweaking of optmem
 - not tested in production
+
+## Testing
+
+```
+go test .
+```

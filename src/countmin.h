@@ -43,24 +43,21 @@ struct cm_value {
 	__u64 ts;
 };
 
+struct cm_hash {
+	__u32 values[HASHFN_N];
+};
+
 struct countmin {
 	struct cm_value values[HASHFN_N][COLUMNS];
 };
 
 // add element and determine count
-static __u32 FORCE_INLINE cm_add_and_query(struct countmin *cm, __u64 now, void *element, __u64 len)
+static __u32 FORCE_INLINE cm_add_and_query(struct countmin *cm, __u64 now, const struct cm_hash *h)
 {
-	const __u32 hashes[] = {
-		fasthash32(element, len, 0x2d31e867),
-		hashlittle(element, len, 0x6ad611c4),
-	};
-
-	_Static_assert(ARRAY_SIZE(hashes) == HASHFN_N, "Missing hash function");
-
-	fpoint min = -1;
+	__u32 min = -1;
 #pragma clang loop unroll(full)
-	for (int i = 0; i < ARRAY_SIZE(hashes); i++) {
-		__u32 target_idx       = hashes[i] & (COLUMNS - 1);
+	for (int i = 0; i < ARRAY_SIZE(cm->values); i++) {
+		__u32 target_idx       = h->values[i] & (ARRAY_SIZE(cm->values[i]) - 1);
 		struct cm_value *value = &cm->values[i][target_idx];
 		value->value           = estimate_rate(value->value, value->ts, now);
 		value->ts              = now;

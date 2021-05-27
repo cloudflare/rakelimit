@@ -3,7 +3,6 @@ package rakelimit
 import (
 	"errors"
 	"fmt"
-	"math"
 	"syscall"
 
 	"github.com/cilium/ebpf"
@@ -11,7 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang-9 rake ./src/rakelimit.c -- -I./include -nostdinc -O3 -Wno-address-of-packed-member
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang-12 rake ./src/rakelimit.c -- -I./include -nostdinc -Os
 
 // Rakelimit holds an instance of a ratelimiter that can be applied on a socket
 type Rakelimit struct {
@@ -86,11 +85,6 @@ func (rl *Rakelimit) Close() error {
 }
 
 func rewriteConstant(spec *ebpf.CollectionSpec, symbol string, value uint64) error {
-	if value == math.MaxUint32 {
-		// Not useable due to a bug in cilium/ebpf.
-		return fmt.Errorf("value exceeds maximum")
-	}
-
 	rewritten := false
 	for name, prog := range spec.Programs {
 		for i := range prog.Instructions {

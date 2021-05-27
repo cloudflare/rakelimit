@@ -107,9 +107,9 @@ func (el *element) marshal() []byte {
 }
 
 type packet struct {
-	element  []byte
 	received uint64
 	key      string
+	element
 }
 
 type packetSpec struct {
@@ -179,7 +179,7 @@ func generatePackets(duration time.Duration, specs ...packetSpec) []packet {
 		packets = append(packets, packet{
 			received: step.now,
 			key:      step.key,
-			element:  next.marshal(),
+			element:  next,
 		})
 
 		prev = next
@@ -240,7 +240,7 @@ func TestRate(t *testing.T) {
 	for i, packet := range packets {
 		rake.updateTime(t, packet.received)
 
-		verdict, _, err := rake.testProgram.Test(packet.element)
+		verdict, _, err := rake.testProgram.Test(packet.marshal())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -336,7 +336,8 @@ func TestGeneralisations(t *testing.T) {
 			for i, packet := range packets {
 				rake.updateTime(t, packet.received)
 
-				verdict, _, err := rake.testProgram.Test(packet.element)
+				t.Logf("%d: %s", i, &packet.element)
+				verdict, _, err := rake.testProgram.Test(packet.marshal())
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -393,7 +394,7 @@ func TestAttackPropagation(t *testing.T) {
 	for i, packet := range packets {
 		rake.updateTime(t, packet.received)
 
-		verdict, _, err := rake.testProgram.Test(packet.element)
+		verdict, _, err := rake.testProgram.Test(packet.marshal())
 		if err != nil {
 			t.Fatal(err)
 		}
