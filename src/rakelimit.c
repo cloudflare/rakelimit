@@ -2,8 +2,8 @@
 #include <ip.h>
 #include <linux/bpf.h>
 #include <linux/types.h>
+#include <mindef.h>
 #include <stdbool.h>
-#include <stddef.h>
 
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>

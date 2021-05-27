@@ -42,6 +42,8 @@ on 1 byte), but shoehorning those bytes into integers efficiently is messy.
 
 #include <linux/types.h>
 
+// clang-format off
+
 #define hashsize(n) ((__u32)1 << (n))
 #define hashmask(n) (hashsize(n) - 1)
 #define rot(x, k) (((x) << (k)) | ((x) >> (32 - (k))))
@@ -159,24 +161,25 @@ static __attribute__((always_inline)) __u32 hashlittle(const void *key, __u64 le
 {
 	__u32 a, b, c;                       /* internal state */
 	const __u32 *k = (const __u32 *)key; /* read 32-bit chunks */
+	const __u32 *end = k + (length / 12) * 3;
 	const __u8 *k8;
 
 	/* Set up the internal state */
 	a = b = c = 0xdeadbeef + ((__u32)length) + initval;
 
 	/*------ all but last block: aligned reads and affect 32 bits of (a,b,c) */
-	while (length > 12) {
+#pragma clang loop unroll(full)
+	while (k != end) {
 		a += k[0];
 		b += k[1];
 		c += k[2];
 		mix(a, b, c);
-		length -= 12;
 		k += 3;
 	}
 
 	/*----------------------------- handle the last (probably partial) block */
 	k8 = (const __u8 *)k;
-	switch (length) {
+	switch (length % 12) {
 	case 12:
 		c += k[2];
 		b += k[1];
