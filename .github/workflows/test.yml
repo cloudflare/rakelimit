@@ -4,7 +4,7 @@ on: push
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
 
     steps:
     - name: Set up Go 1.x
@@ -18,10 +18,10 @@ jobs:
     - name: Install clang
       run: |
         wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key 2>/dev/null | sudo apt-key add -
-        echo 'deb http://apt.llvm.org/bionic/ llvm-toolchain-bionic-9 main' | sudo tee /etc/apt/sources.list.d/clang.list
+        echo 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-12 main' | sudo tee /etc/apt/sources.list.d/clang.list
         # Only update the llvm repo, this is a lot faster.
         sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/clang.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
-        sudo apt-get install -y clang-9
+        sudo apt-get install -y --no-install-recommends clang-12
 
     - name: Check lint
       # gofmt doesn't report any changes
@@ -29,5 +29,5 @@ jobs:
 
     - name: Run tests
       run: |
-        sudo sysctl -w net.core.optmem_max=64000
-        sudo -E env "PATH=$PATH" go test ./...
+        sudo sysctl -w net.core.optmem_max=22528
+        go test -tags cgotest -exec sudo ./...

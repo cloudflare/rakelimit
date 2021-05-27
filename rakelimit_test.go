@@ -12,6 +12,34 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestLoad(t *testing.T) {
+	spec, err := loadRake()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := rewriteConstant(spec, "LIMIT", uint64(100)); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("IPv4", func(t *testing.T) {
+		var objs struct {
+			Prog *ebpf.Program `ebpf:"filter_ipv4"`
+		}
+		if err := spec.LoadAndAssign(&objs, nil); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Run("IPv6", func(t *testing.T) {
+		var objs struct {
+			Prog *ebpf.Program `ebpf:"filter_ipv6"`
+		}
+		if err := spec.LoadAndAssign(&objs, nil); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
 const floatBits = 32
 
 type FixedPointTuple struct {
@@ -41,8 +69,8 @@ func TestBPFFloatToFixedPoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res == 0 {
-		t.Fatal("BPF was unable to compare successfully to 27")
+	if res != 0 {
+		t.Fatalf("Error on line %d", res)
 	}
 
 	var fp uint64

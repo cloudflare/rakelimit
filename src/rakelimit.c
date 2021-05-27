@@ -12,6 +12,9 @@
 #include "countmin.h"
 #include "fasthash.h"
 
+#define FH_SEED (0x2d31e867)
+#define L3_SEED (0x6ad611c3)
+
 #define PARAMETER(type, name) \
 	({ \
 		type __tmp; \
@@ -26,11 +29,6 @@ enum address_gen {
 	ADDRESS_WILDCARD = 2, // /0
 };
 
-enum address_specifier {
-	SOURCE,
-	DEST,
-};
-
 enum port_gen {
 	PORT_SPECIFIED = 0,
 	PORT_WILDCARD  = 1,
@@ -43,6 +41,17 @@ struct gen {
 	enum address_gen dest;
 	enum port_gen dest_port;
 	bool evaluate;
+};
+
+struct address_hash {
+	__u64 vals[ADDRESS_WILDCARD];
+};
+
+struct hash {
+	struct address_hash src;
+	struct address_hash dst;
+	__u64 src_port;
+	__u64 dst_port;
 };
 
 static const struct gen generalisations[] = {
@@ -76,23 +85,6 @@ static const struct gen generalisations[] = {
 	{4, ADDRESS_WILDCARD, PORT_WILDCARD, ADDRESS_IP, PORT_WILDCARD, true},
 };
 
-struct packet {
-	__u16 source_port;
-	__u16 destination_port;
-	union {
-		struct {
-			struct in_addr source_address;
-			struct in_addr destination_address;
-		} ipv4;
-		struct {
-			struct in6_addr source_address;
-			struct in6_addr destination_address;
-		} ipv6;
-	};
-};
-
-_Static_assert(sizeof(struct packet) == sizeof(__u16) * 2 + sizeof(struct in6_addr) * 2, "wrong packet size");
-
 // collect number of packet drops per level
 struct bpf_map_def SEC("maps") stats = {
 	.type        = BPF_MAP_TYPE_ARRAY,
@@ -108,19 +100,62 @@ struct bpf_map_def SEC("maps") countmin = {
 	.max_entries = ARRAY_SIZE(generalisations),
 };
 
-static int FORCE_INLINE gen_level(const struct gen *gen)
+static FORCE_INLINE void ipv6_hash(const struct in6_addr *ip, struct address_hash *a, struct address_hash *b)
 {
-	// The enum values are chosen so that they add up to the correct level.
-	return gen->source + gen->source_port + gen->dest + gen->dest_port;
+	a->vals[ADDRESS_IP]  = fasthash64(ip, sizeof(*ip), FH_SEED);
+	b->vals[ADDRESS_IP]  = hashlittle(ip, sizeof(*ip), L3_SEED);
+	a->vals[ADDRESS_NET] = fasthash64(ip, 48 / 8, FH_SEED);
+	b->vals[ADDRESS_NET] = hashlittle(ip, 48 / 8, L3_SEED);
 }
 
-static __u32 FORCE_INLINE add_to_node(__u32 node_idx, __u64 ts, void *element, __u64 len)
+static FORCE_INLINE void ipv4_hash(struct in_addr ip, struct address_hash *a, struct address_hash *b)
+{
+	a->vals[ADDRESS_IP] = fasthash64(&ip, sizeof(ip), FH_SEED);
+	b->vals[ADDRESS_IP] = hashlittle(&ip, sizeof(ip), L3_SEED);
+	ip.s_addr &= 0xffffff00;
+	a->vals[ADDRESS_NET] = fasthash64(&ip, sizeof(ip), FH_SEED);
+	b->vals[ADDRESS_NET] = hashlittle(&ip, sizeof(ip), L3_SEED);
+}
+
+static FORCE_INLINE __u64 hash_mix(__u64 a, __u64 b)
+{
+	// Adapted from https://stackoverflow.com/a/27952689. The constant below
+	// is derived from the golden ratio.
+	a ^= b + 0x9e3779b97f4a7c15 + (a << 6) + (a >> 2);
+	return a;
+}
+
+static FORCE_INLINE __u32 gen_hash(const struct gen *gen, const struct hash *ph)
+{
+	__u64 tmp = 0;
+
+	if (gen->source != ADDRESS_WILDCARD) {
+		tmp = hash_mix(tmp, ph->src.vals[gen->source]);
+	}
+
+	if (gen->dest != ADDRESS_WILDCARD) {
+		tmp = hash_mix(tmp, ph->dst.vals[gen->dest]);
+	}
+
+	if (gen->source_port != PORT_WILDCARD) {
+		tmp = hash_mix(tmp, ph->src_port);
+	}
+
+	if (gen->dest_port != PORT_WILDCARD) {
+		tmp = hash_mix(tmp, ph->dst_port);
+	}
+
+	// Adapted from fasthash32
+	return tmp - (tmp >> 32);
+}
+
+static __u32 FORCE_INLINE add_to_node(__u32 node_idx, __u64 ts, const struct cm_hash *h)
 {
 	struct countmin *node = bpf_map_lookup_elem(&countmin, &node_idx);
 	if (node == NULL) {
 		return -1;
 	}
-	return cm_add_and_query(node, ts, element, len);
+	return cm_add_and_query(node, ts, h);
 }
 
 static FORCE_INLINE void log_level_drop(__u32 level)
@@ -144,55 +179,9 @@ static FORCE_INLINE __u64 transport_offset_ipv6(struct __sk_buff *skb)
 	return sizeof(struct ip6_hdr);
 }
 
-static FORCE_INLINE void fill_ipv4(struct in_addr *ip, struct __sk_buff *skb, enum address_gen type, enum address_specifier spec)
+static FORCE_INLINE int load_ipv6(struct in6_addr *ip, struct __sk_buff *skb, __u64 off)
 {
-	__u64 off = spec == SOURCE ? offsetof(struct iphdr, saddr) : offsetof(struct iphdr, daddr);
-
-	if (type == ADDRESS_WILDCARD) {
-		ip->s_addr = 0;
-		return;
-	}
-
-	ip->s_addr = load_word(skb, BPF_NET_OFF + off);
-
-	switch (type) {
-	case ADDRESS_NET:
-		ip->s_addr &= 0xffffff00;
-		break;
-
-	case ADDRESS_WILDCARD: // Already handled above.
-	case ADDRESS_IP:       // Nothing to do.
-		break;
-	}
-}
-
-static FORCE_INLINE void fill_ipv6(struct in6_addr *ip, struct __sk_buff *skb, enum address_gen type, enum address_specifier spec)
-{
-	__u64 off = spec == SOURCE ? offsetof(struct ip6_hdr, ip6_src) : offsetof(struct ip6_hdr, ip6_dst);
-
-	if (type == ADDRESS_WILDCARD) {
-		*ip = (struct in6_addr){0};
-		return;
-	}
-
-	// TODO: This can return an error.
-	bpf_skb_load_bytes(skb, off, ip, sizeof(*ip));
-
-	// 16: 0    1    2    3    4    5    6    7
-	// 32: 0         1         2         3
-	// /48 ffff ffff ffff 0000 0000 0000 0000 0000
-	// /64 ffff ffff ffff ffff 0000 0000 0000 0000
-	switch (type) {
-	case ADDRESS_NET:
-		ip->s6_addr16[3] = 0;
-		ip->s6_addr32[2] = 0;
-		ip->s6_addr32[3] = 0;
-		break;
-
-	case ADDRESS_WILDCARD: // Already handled above.
-	case ADDRESS_IP:       // Nothing to do.
-		break;
-	}
+	return bpf_skb_load_bytes(skb, off, ip, sizeof(*ip));
 }
 
 static FORCE_INLINE int drop_or_accept(__u32 level, fpoint limit, __u32 max_rate, __u32 rand)
@@ -206,9 +195,11 @@ static FORCE_INLINE int drop_or_accept(__u32 level, fpoint limit, __u32 max_rate
 
 static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64 ts, __u32 rand, __u64 *rate_exceeded_level)
 {
-	struct packet pkt = {0};
-	__u32 max_rate    = 0;
-	__u32 limit       = PARAMETER(__u32, "LIMIT");
+	__u32 limit = PARAMETER(__u32, "LIMIT");
+	struct hash ph[HASHFN_N];
+	struct in6_addr ipv6;
+	struct in_addr ipv4;
+	__u32 max_rate = 0;
 
 	if (limit == 0) {
 		return SKB_PASS;
@@ -217,43 +208,51 @@ static FORCE_INLINE int process_packet(struct __sk_buff *skb, __u16 proto, __u64
 	__u64 troff;
 	switch (proto) {
 	case ETH_P_IP:
-		troff = transport_offset_ipv4(skb);
+		troff       = transport_offset_ipv4(skb);
+		ipv4.s_addr = load_word(skb, BPF_NET_OFF + offsetof(struct iphdr, saddr));
+		ipv4_hash(ipv4, &ph[0].src, &ph[1].src);
+		ipv4.s_addr = load_word(skb, BPF_NET_OFF + offsetof(struct iphdr, daddr));
+		ipv4_hash(ipv4, &ph[0].dst, &ph[1].dst);
 		break;
 
 	case ETH_P_IPV6:
 		troff = transport_offset_ipv6(skb);
+		if (load_ipv6(&ipv6, skb, offsetof(struct ip6_hdr, ip6_src))) {
+			return SKB_REJECT;
+		}
+		ipv6_hash(&ipv6, &ph[0].src, &ph[1].src);
+		if (load_ipv6(&ipv6, skb, offsetof(struct ip6_hdr, ip6_dst))) {
+			return SKB_REJECT;
+		}
+		ipv6_hash(&ipv6, &ph[0].dst, &ph[1].dst);
 		break;
 
 	default:
 		return SKB_REJECT;
 	}
 
+	__u16 src_port = load_half(skb, troff);
+	ph[0].src_port = fasthash64(&src_port, sizeof(src_port), FH_SEED);
+	ph[1].src_port = hashlittle(&src_port, sizeof(src_port), L3_SEED);
+	__u16 dst_port = load_half(skb, troff + 2);
+	ph[0].dst_port = fasthash64(&dst_port, sizeof(dst_port), FH_SEED);
+	ph[1].dst_port = hashlittle(&dst_port, sizeof(dst_port), L3_SEED);
+
 #pragma clang loop unroll(full)
 	for (int i = 0; i < ARRAY_SIZE(generalisations); i++) {
 		const struct gen *gen = &generalisations[i];
 		const int level       = gen->level;
-		__u32 rate;
 
 		// Force clang to inline level on the stack rather than loading it from
 		// .rodata later on.
 		asm volatile("" : : "r"(level) : "memory");
 
-		pkt.source_port      = (gen->source_port == PORT_WILDCARD) ? 0 : load_half(skb, troff);
-		pkt.destination_port = (gen->dest_port == PORT_WILDCARD) ? 0 : load_half(skb, troff + 2);
+		struct cm_hash h = {{
+			gen_hash(gen, &ph[0]),
+			gen_hash(gen, &ph[1]),
+		}};
 
-		switch (proto) {
-		case ETH_P_IP:
-			fill_ipv4(&pkt.ipv4.source_address, skb, gen->source, SOURCE);
-			fill_ipv4(&pkt.ipv4.destination_address, skb, gen->dest, DEST);
-			rate = add_to_node(i, ts, &pkt, offsetofend(struct packet, ipv4));
-			break;
-
-		case ETH_P_IPV6:
-			fill_ipv6(&pkt.ipv6.source_address, skb, gen->source, SOURCE);
-			fill_ipv6(&pkt.ipv6.destination_address, skb, gen->dest, DEST);
-			rate = add_to_node(i, ts, &pkt, offsetofend(struct packet, ipv6));
-			break;
-		}
+		__u32 rate = add_to_node(i, ts, &h);
 
 		if (rate > max_rate) {
 			max_rate = rate;
@@ -348,20 +347,16 @@ int test_fp_cmp(struct __sk_buff *skb)
 	int i     = 0;
 	__u64 *fp = bpf_map_lookup_elem(&test_single_result, &i);
 	if (fp == NULL) {
-		char msg[] = "[E] element 0 in map 'test_single_result' not found\n";
-		bpf_trace_printk(msg, sizeof(msg));
-		return SKB_REJECT;
+		return __LINE__;
 	}
 	// first check the value from userside
 	if (to_fixed_point(27, 0) != *fp) {
-		char msg[] = "[E] fixed points are not equal\n";
-		bpf_trace_printk(msg, sizeof(msg));
-		return SKB_REJECT;
+		return __LINE__;
 	}
 	// then replace it
 	*fp = to_fixed_point(19, 0);
 	bpf_map_update_elem(&test_single_result, &i, fp, 0);
-	return SKB_PASS;
+	return 0;
 }
 
 // test_ewma takes a previous rate from index 0 (as a u32) and an old and
